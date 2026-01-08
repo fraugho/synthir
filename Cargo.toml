@@ -1,0 +1,40 @@
+[package]
+name = "synthir"
+version = "0.1.0"
+edition = "2021"
+description = "Synthetic IR dataset generator for realistic information retrieval evaluation"
+license = "MIT"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# OpenAI-compatible API client
+async-openai = "0.24"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Progress bars and logging
+indicatif = "0.17"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+thiserror = "1"
+anyhow = "1"
+
+# BM25 hard negative mining
+tantivy = "0.22"
+
+# Async utilities
+futures = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
