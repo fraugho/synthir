@@ -415,6 +415,84 @@ impl<'a> RelevanceScorer<'a> {
 
         Ok(all_qrels)
     }
+
+    /// Score every query against every document (exhaustive mode)
+    /// This is expensive: O(queries * documents) LLM calls
+    pub async fn score_exhaustive(
+        &self,
+        queries: &[BeirQuery],
+        documents: &[BeirDocument],
+        concurrency: usize,
+    ) -> Result<Vec<Qrel>> {
+        let total_pairs = queries.len() * documents.len();
+        info!(
+            "Exhaustive scoring: {} queries x {} documents = {} pairs",
+            queries.len(),
+            documents.len(),
+            total_pairs
+        );
+
+        let concurrency = concurrency.max(1);
+
+        let pb = ProgressBar::new(total_pairs as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} exhaustive scores ({eta})")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+
+        // Build all query-document pairs
+        let pairs: Vec<_> = queries
+            .iter()
+            .flat_map(|q| documents.iter().map(move |d| (q.clone(), d.clone())))
+            .collect();
+
+        let semaphore = Arc::new(Semaphore::new(concurrency));
+        let mut all_qrels = Vec::new();
+
+        // Process in chunks for memory efficiency
+        for chunk in pairs.chunks(concurrency * 4) {
+            let futures: Vec<_> = chunk
+                .iter()
+                .map(|(query, doc)| {
+                    let sem = semaphore.clone();
+                    let q = query.clone();
+                    let d = doc.clone();
+                    async move {
+                        let _permit = sem.acquire().await.unwrap();
+                        let result = self.score_one_fine(&q, &d).await;
+                        (q.id.clone(), d.id.clone(), result)
+                    }
+                })
+                .collect();
+
+            let batch_results: Vec<_> = stream::iter(futures)
+                .buffer_unordered(concurrency)
+                .collect()
+                .await;
+
+            for (query_id, doc_id, result) in batch_results {
+                if let Ok(fine_score) = result {
+                    let trec_score = Self::fine_to_trec(fine_score);
+                    all_qrels.push(Qrel {
+                        query_id,
+                        doc_id,
+                        score: trec_score,
+                    });
+                }
+                pb.inc(1);
+            }
+        }
+
+        pb.finish_with_message("Exhaustive scoring complete");
+        info!(
+            "Generated {} relevance judgments using exhaustive scoring",
+            all_qrels.len()
+        );
+
+        Ok(all_qrels)
+    }
 }
 
 /// Escape special characters for tantivy query parser

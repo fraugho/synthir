@@ -75,6 +75,11 @@ impl OutputOrganizer {
         self.merged_dir().join("with-hard-negatives")
     }
 
+    /// Get combined directory (everything in one place)
+    pub fn combined_dir(&self) -> PathBuf {
+        self.topic_dir().join("combined")
+    }
+
     /// Get hard negatives file path
     pub fn hard_negatives_path(&self) -> PathBuf {
         self.hard_negatives_merged_dir().join("hard_negatives.jsonl")
@@ -99,6 +104,7 @@ impl OutputOrganizer {
         // Create merged directories
         fs::create_dir_all(self.general_merged_dir())?;
         fs::create_dir_all(self.hard_negatives_merged_dir())?;
+        fs::create_dir_all(self.combined_dir())?;
 
         Ok(())
     }

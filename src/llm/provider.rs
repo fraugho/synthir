@@ -7,8 +7,9 @@ use async_openai::{
     },
     Client,
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
 use thiserror::Error;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Configuration for the LLM provider
 #[derive(Debug, Clone)]
@@ -266,6 +267,150 @@ impl LLMProvider {
     pub async fn generate_topic(&self, prompt: &str) -> Result<String> {
         self.generate_with_retry(None, prompt, OutputType::Topic)
             .await
+    }
+}
+
+
+/// Multi-endpoint LLM provider that round-robins requests across multiple base URLs or model instances
+/// Useful for running multiple LMStudio servers on different ports
+///
+/// NOTE: LMStudio processes requests sequentially on a single GPU. For true parallel throughput,
+/// you need multiple LMStudio server processes on different ports, or use a backend that supports
+/// concurrent batch inference (vLLM, TGI, llama.cpp server with multiple slots).
+pub struct MultiEndpointProvider {
+    providers: Vec<LLMProvider>,
+    counter: AtomicUsize,
+}
+
+impl MultiEndpointProvider {
+    /// Create a new multi-endpoint provider
+    /// base_urls can be comma-separated or a single URL
+    pub fn new(base_urls: &str, api_key: &str, model: &str, max_retries: u32) -> Result<Self> {
+        let urls: Vec<&str> = base_urls.split(',').map(|s| s.trim()).collect();
+
+        if urls.is_empty() {
+            anyhow::bail!("At least one base URL is required");
+        }
+
+        let mut providers = Vec::with_capacity(urls.len());
+        for url in &urls {
+            let config = LLMProviderConfig {
+                base_url: url.to_string(),
+                api_key: api_key.to_string(),
+                model: model.to_string(),
+                max_retries,
+            };
+            providers.push(LLMProvider::new(config)?);
+        }
+
+        if providers.len() > 1 {
+            info!("Created multi-endpoint provider with {} endpoints", providers.len());
+        }
+
+        Ok(Self {
+            providers,
+            counter: AtomicUsize::new(0),
+        })
+    }
+
+    /// Create a multi-model provider with different model identifiers
+    /// Useful for round-robining across multiple loaded model instances in LMStudio
+    /// model_ids should be comma-separated (e.g., "instance-1,instance-2,instance-3")
+    pub fn new_multi_model(
+        base_url: &str,
+        api_key: &str,
+        model_ids: &str,
+        max_retries: u32,
+    ) -> Result<Self> {
+        let models: Vec<&str> = model_ids.split(',').map(|s| s.trim()).collect();
+
+        if models.is_empty() {
+            anyhow::bail!("At least one model identifier is required");
+        }
+
+        let mut providers = Vec::with_capacity(models.len());
+        for model in &models {
+            let config = LLMProviderConfig {
+                base_url: base_url.to_string(),
+                api_key: api_key.to_string(),
+                model: model.to_string(),
+                max_retries,
+            };
+            providers.push(LLMProvider::new(config)?);
+        }
+
+        if providers.len() > 1 {
+            info!(
+                "Created multi-model provider with {} model instances",
+                providers.len()
+            );
+        }
+
+        Ok(Self {
+            providers,
+            counter: AtomicUsize::new(0),
+        })
+    }
+
+    /// Get the next provider in round-robin fashion
+    fn next_provider(&self) -> &LLMProvider {
+        let idx = self.counter.fetch_add(1, Ordering::Relaxed) % self.providers.len();
+        &self.providers[idx]
+    }
+
+    /// Get number of endpoints
+    pub fn endpoint_count(&self) -> usize {
+        self.providers.len()
+    }
+
+    /// Send a completion request (round-robin across endpoints)
+    pub async fn complete(&self, system_prompt: Option<&str>, user_prompt: &str) -> Result<String> {
+        self.next_provider().complete(system_prompt, user_prompt).await
+    }
+
+    /// Generate with retry logic
+    pub async fn generate_with_retry(
+        &self,
+        system_prompt: Option<&str>,
+        user_prompt: &str,
+        expected: OutputType,
+    ) -> Result<String> {
+        self.next_provider().generate_with_retry(system_prompt, user_prompt, expected).await
+    }
+
+    /// Generate a document
+    pub async fn generate_document(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
+        self.next_provider().generate_document(system_prompt, user_prompt).await
+    }
+
+    /// Generate a query
+    pub async fn generate_query(&self, user_prompt: &str) -> Result<String> {
+        self.next_provider().generate_query(user_prompt).await
+    }
+
+    /// Score relevance (returns 0-3)
+    pub async fn score_relevance(&self, prompt: &str) -> Result<u8> {
+        self.next_provider().score_relevance(prompt).await
+    }
+
+    /// Score relevance on fine-grained scale (returns 0-100)
+    pub async fn score_fine_grained(&self, prompt: &str) -> Result<u8> {
+        self.next_provider().score_fine_grained(prompt).await
+    }
+
+    /// Yes/No validation
+    pub async fn validate_yes_no(&self, prompt: &str) -> Result<bool> {
+        self.next_provider().validate_yes_no(prompt).await
+    }
+
+    /// Generate a topic
+    pub async fn generate_topic(&self, prompt: &str) -> Result<String> {
+        self.next_provider().generate_topic(prompt).await
+    }
+
+    /// Get first provider (for backwards compatibility)
+    pub fn first(&self) -> &LLMProvider {
+        &self.providers[0]
     }
 }
 

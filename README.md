@@ -215,7 +215,7 @@ Relevance scores (TREC scale):
 
 ## Scoring Modes
 
-synthir supports two scoring modes for generating relevance judgments:
+synthir supports three scoring modes for generating relevance judgments:
 
 ### Source Mode (Default)
 
@@ -224,7 +224,7 @@ synthir generate -t recipes --scoring-mode source
 ```
 
 - **1-to-1 mapping**: Each query maps to its source document only
-- Faster generation
+- Fastest generation
 - Good for basic evaluation datasets
 
 ### Pooled Mode
@@ -242,15 +242,22 @@ synthir generate -t recipes --scoring-mode pooled --pool-size 30
 - More realistic evaluation with graded relevance
 - No artificial capping - cliff algorithm determines relevant set size
 
-Example output distribution:
+### Exhaustive Mode
+
+```bash
+synthir generate -t recipes --scoring-mode exhaustive
 ```
-Query: "how to make chocolate cake moist"
-  doc_000012: 92 → score 3 (highly relevant)
-  doc_000045: 78 → score 3 (highly relevant)
-  doc_000003: 65 → score 2 (relevant)
-  --- cliff detected (gap: 25 points) ---
-  doc_000089: 40 → score 0 (hard negative)
-  doc_000023: 35 → score 0 (hard negative)
+
+- **Complete coverage**: Every query scored against every document
+- O(queries × documents) LLM calls - use for smaller datasets
+- Most thorough relevance judgments
+- Best for high-quality evaluation benchmarks
+
+Example output (5 docs, 12 queries = 60 qrels):
+```
+natural_000001 → doc_000001: 2, doc_000002: 3, doc_000003: 2, doc_000004: 1, doc_000005: 3
+natural_000002 → doc_000001: 0, doc_000002: 3, doc_000003: 1, doc_000004: 2, doc_000005: 0
+...
 ```
 
 ## Checkpointing
@@ -301,12 +308,67 @@ synthir generate -t recipes \
   --api-key your-key
 ```
 
+## Multi-Endpoint Support
+
+For true parallel throughput with LMStudio, run multiple LMStudio server processes:
+
+```bash
+# Terminal 1 (GPU 0)
+CUDA_VISIBLE_DEVICES=0 lms server start --port 1234
+
+# Terminal 2 (GPU 1)
+CUDA_VISIBLE_DEVICES=1 lms server start --port 1235
+```
+
+Then use comma-separated URLs:
+
+```bash
+synthir generate -t recipes -j 8 \
+  --base-url "http://localhost:1234/v1,http://localhost:1235/v1" \
+  --model your-model \
+  --api-key lm-studio
+```
+
+Requests are round-robined across all endpoints for maximum throughput.
+
+**Note:** A single LMStudio server processes requests sequentially on the GPU, so increasing `-j` beyond 1-2 won't improve throughput. For true parallelism, use multiple server processes on different GPUs or ports.
+
+For backends that support concurrent batch inference (vLLM, TGI, llama.cpp server with multiple slots), a single endpoint with high `-j` values will work.
+
+## Output Structure
+
+```
+datasets/
+└── recipes/
+    ├── corpus.jsonl
+    ├── queries/
+    │   ├── natural/
+    │   │   ├── queries.jsonl
+    │   │   └── qrels.tsv
+    │   ├── keyword/
+    │   ├── academic/
+    │   ├── complex/
+    │   └── mixed/
+    ├── merged/
+    │   ├── general/
+    │   └── with-hard-negatives/
+    ├── combined/              # Everything in one place
+    │   ├── corpus.jsonl
+    │   ├── queries.jsonl
+    │   └── qrels.tsv
+    └── metadata.json
+```
+
+The `combined/` folder contains all data in one place for easy use.
+
 ## Performance Tips
 
 1. **Run benchmark first** to find optimal concurrency for your setup
 2. **Use `-j 8` or higher** for local LLMs with good hardware
-3. **Use `--shared-corpus`** in meta mode if topics are similar
-4. **Use `--no-hard-negatives`** for faster generation (skip BM25 mining)
+3. **Use multiple endpoints** for true parallel throughput with LMStudio
+4. **Use `--shared-corpus`** in meta mode if topics are similar
+5. **Use `--no-hard-negatives`** for faster generation (skip BM25 mining)
+6. **Use smaller models** like `liquid/lfm2.5-1.2b` for faster iteration
 
 ## License
 

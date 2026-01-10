@@ -10,6 +10,8 @@ pub enum ScoringMode {
     Source,
     /// Use BM25 pooling + cliff detection for many-to-many mappings
     Pooled,
+    /// Score every query against every document (exhaustive, expensive)
+    Exhaustive,
 }
 
 impl std::fmt::Display for ScoringMode {
@@ -17,6 +19,7 @@ impl std::fmt::Display for ScoringMode {
         match self {
             ScoringMode::Source => write!(f, "source"),
             ScoringMode::Pooled => write!(f, "pooled"),
+            ScoringMode::Exhaustive => write!(f, "exhaustive"),
         }
     }
 }
@@ -28,7 +31,8 @@ impl std::str::FromStr for ScoringMode {
         match s.to_lowercase().as_str() {
             "source" => Ok(ScoringMode::Source),
             "pooled" => Ok(ScoringMode::Pooled),
-            _ => Err(format!("Invalid scoring mode: {}. Use 'source' or 'pooled'", s)),
+            "exhaustive" => Ok(ScoringMode::Exhaustive),
+            _ => Err(format!("Invalid scoring mode: {}. Use 'source', 'pooled', or 'exhaustive'", s)),
         }
     }
 }

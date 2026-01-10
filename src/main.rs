@@ -6,7 +6,7 @@ use synthir::{
     checkpoint::{CheckpointManager, GenerationPhase, ProgressState},
     config::{GenerationConfig, QueryType, RuntimeOptions, ScoringMode},
     generation::{DocumentGenerator, QueryGenerator, RelevanceScorer},
-    llm::{topic_generation_prompt, LLMProvider, LLMProviderConfig},
+    llm::{topic_generation_prompt, LLMProvider, LLMProviderConfig, MultiEndpointProvider},
     meta::{run_meta_generation, MetaConfig},
     mining::HardNegativeMiner,
     output::{
@@ -52,7 +52,7 @@ enum Commands {
         #[arg(short, long, default_value = "./datasets")]
         output: PathBuf,
 
-        /// LLM API base URL
+        /// LLM API base URL (comma-separated for multiple endpoints)
         #[arg(long, default_value = "https://api.openai.com/v1")]
         base_url: String,
 
@@ -88,7 +88,7 @@ enum Commands {
         #[arg(short = 'j', long, default_value = "1")]
         concurrency: usize,
 
-        /// Scoring mode: 'source' (1-to-1) or 'pooled' (many-to-many with BM25)
+        /// Scoring mode: 'source', 'pooled', or 'exhaustive'
         #[arg(long, default_value = "source")]
         scoring_mode: String,
 
@@ -265,6 +265,7 @@ async fn main() -> Result<()> {
                 verbose,
                 resume,
                 api_key: api_key.clone(),
+                ..Default::default()
             };
 
             // Get or generate topic config
@@ -431,12 +432,42 @@ async fn run_generation(
     topic_config: TopicConfig,
     options: RuntimeOptions,
 ) -> Result<()> {
-    let provider = LLMProvider::new(LLMProviderConfig {
-        base_url: config.base_url.clone(),
-        api_key: options.api_key.clone(),
-        model: config.model.clone(),
-        max_retries: 3,
-    })?;
+    // Create provider - supports multiple URLs or multiple model identifiers
+    let multi_provider = if config.model.contains(',') {
+        // Multiple model identifiers (for manually loaded LMStudio instances)
+        MultiEndpointProvider::new_multi_model(
+            &config.base_url,
+            &options.api_key,
+            &config.model,
+            3,
+        )?
+    } else if config.base_url.contains(',') {
+        // Multiple endpoints (for multiple LMStudio servers on different ports)
+        MultiEndpointProvider::new(
+            &config.base_url,
+            &options.api_key,
+            &config.model,
+            3,
+        )?
+    } else {
+        // Single endpoint, single model
+        MultiEndpointProvider::new(
+            &config.base_url,
+            &options.api_key,
+            &config.model,
+            3,
+        )?
+    };
+
+    if multi_provider.endpoint_count() > 1 {
+        info!(
+            "Using {} endpoints/instances for parallel requests",
+            multi_provider.endpoint_count()
+        );
+    }
+
+    // Get first provider for generators that need single provider reference
+    let provider = multi_provider.first();
 
     let organizer = OutputOrganizer::new(config.output_dir.clone(), topic_config.name.clone());
     organizer.create_structure()?;
@@ -545,6 +576,13 @@ async fn run_generation(
                     .score_pooled(&all_queries, &documents, config.pool_size, config.concurrency)
                     .await?
             }
+            ScoringMode::Exhaustive => {
+                // Score every query against every document
+                let all_queries: Vec<_> = all_query_doc_pairs.iter().map(|(q, _)| q.clone()).collect();
+                scorer
+                    .score_exhaustive(&all_queries, &documents, config.concurrency)
+                    .await?
+            }
         };
 
         // Write qrels for each query type
@@ -597,6 +635,18 @@ async fn run_generation(
             &all_query_refs,
         )?;
         write_qrels(&organizer.general_merged_dir().join("qrels.tsv"), &qrels)?;
+
+        // Write combined folder (corpus + all queries + all qrels in one place)
+        info!("Writing combined output folder...");
+        std::fs::copy(
+            organizer.corpus_path(),
+            organizer.combined_dir().join("corpus.jsonl"),
+        )?;
+        write_queries(
+            &organizer.combined_dir().join("queries.jsonl"),
+            &all_query_refs,
+        )?;
+        write_qrels(&organizer.combined_dir().join("qrels.tsv"), &qrels)?;
 
         state.advance_phase();
         checkpoint_mgr.force_save(&state)?;
