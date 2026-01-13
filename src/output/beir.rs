@@ -26,7 +26,7 @@ pub struct BeirQuery {
 pub struct Qrel {
     pub query_id: String,
     pub doc_id: String,
-    pub score: u8,
+    pub score: u16,
 }
 
 /// Write documents to a BEIR corpus.jsonl file

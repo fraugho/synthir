@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use synthir::{
     benchmark::{run_benchmark, BenchmarkConfig},
     checkpoint::{CheckpointManager, GenerationPhase, ProgressState},
-    config::{GenerationConfig, QueryType, RuntimeOptions, ScoringMode},
+    config::{GenerationConfig, QueryType, RuntimeOptions, ScoreScale, ScoringMode},
     generation::{DocumentGenerator, QueryGenerator, RelevanceScorer},
     llm::{topic_generation_prompt, LLMProvider, LLMProviderConfig, MultiEndpointProvider},
     meta::{run_meta_generation, MetaConfig},
@@ -95,6 +95,18 @@ enum Commands {
         /// Pool size for pooled scoring (top-k docs per query)
         #[arg(long, default_value = "30")]
         pool_size: usize,
+
+        /// Score scale: 'trec' (0-3) or 'range' (custom min/max)
+        #[arg(long, default_value = "trec")]
+        score_scale: String,
+
+        /// Minimum score for custom range (default: 0)
+        #[arg(long, default_value = "0")]
+        score_min: u16,
+
+        /// Maximum score for custom range (default: 100)
+        #[arg(long, default_value = "100")]
+        score_max: u16,
     },
 
     /// Generate queries for an existing corpus
@@ -228,6 +240,9 @@ async fn main() -> Result<()> {
             concurrency,
             scoring_mode,
             pool_size,
+            score_scale,
+            score_min,
+            score_max,
         } => {
             // Set up logging
             let level = if verbose { Level::DEBUG } else { Level::INFO };
@@ -244,6 +259,16 @@ async fn main() -> Result<()> {
                 .parse()
                 .map_err(|e: String| anyhow::anyhow!(e))?;
 
+            // Parse score scale
+            let score_scale: ScoreScale = score_scale
+                .parse()
+                .map_err(|e: String| anyhow::anyhow!(e))?;
+
+            // Validate score range
+            if score_min > score_max {
+                anyhow::bail!("--score-min ({}) cannot be greater than --score-max ({})", score_min, score_max);
+            }
+
             // Build config
             let config = GenerationConfig {
                 topic: topic.clone().unwrap_or_else(|| "recipes".to_string()),
@@ -258,6 +283,9 @@ async fn main() -> Result<()> {
                 concurrency,
                 scoring_mode,
                 pool_size,
+                score_scale,
+                score_min,
+                score_max,
             };
 
             let options = RuntimeOptions {
@@ -558,10 +586,16 @@ async fn run_generation(
 
         // Phase 3: Relevance Scoring
         info!(
-            "Scoring relevance (mode: {}, concurrency: {})...",
-            config.scoring_mode, config.concurrency
+            "Scoring relevance (mode: {}, scale: {}, concurrency: {})...",
+            config.scoring_mode, config.score_scale, config.concurrency
         );
-        let scorer = RelevanceScorer::new(&provider, options.dry_run);
+        let scorer = RelevanceScorer::with_scale(
+            &provider,
+            options.dry_run,
+            config.score_scale,
+            config.score_min,
+            config.score_max,
+        );
 
         let qrels = match config.scoring_mode {
             ScoringMode::Source => {

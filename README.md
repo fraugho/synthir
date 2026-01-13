@@ -73,8 +73,11 @@ synthir generate [OPTIONS]
 | `--resume` | Resume from checkpoint | false |
 | `--dry-run` | Show what would happen | false |
 | `--no-hard-negatives` | Skip hard negative mining | false |
-| `--scoring-mode` | Scoring mode: `source` or `pooled` | source |
+| `--scoring-mode` | Scoring mode: `source`, `pooled`, or `exhaustive` | source |
 | `--pool-size` | Pool size for pooled scoring (top-k docs) | 30 |
+| `--score-scale` | Score scale: `trec` (0-3) or `range` (custom) | trec |
+| `--score-min` | Minimum score for custom range | 0 |
+| `--score-max` | Maximum score for custom range | 100 |
 | `-v, --verbose` | Verbose output | false |
 
 ### `queries` - Generate Queries for Existing Corpus
@@ -207,11 +210,41 @@ query_id    doc_id      score
 natural_000001  doc_000001  3
 ```
 
-Relevance scores (TREC scale):
+Relevance scores (TREC scale, default):
 - 0 = Not relevant
 - 1 = Marginally relevant
 - 2 = Relevant
 - 3 = Highly relevant
+
+## Score Scales
+
+synthir supports two score scales for relevance judgments:
+
+### TREC Scale (Default)
+
+```bash
+synthir generate -t recipes --score-scale trec
+```
+
+Standard TREC 0-3 relevance scale used in academic IR evaluation.
+
+### Custom Range Scale
+
+```bash
+# 0-10 scale
+synthir generate -t recipes --score-scale range --score-min 0 --score-max 10
+
+# 1-5 star rating scale
+synthir generate -t recipes --score-scale range --score-min 1 --score-max 5
+
+# 0-100 percentage scale
+synthir generate -t recipes --score-scale range --score-min 0 --score-max 100
+```
+
+Custom range scoring asks the LLM to rate relevance on your specified scale. The prompt dynamically adjusts thresholds based on your range. Useful for:
+- Matching existing annotation schemes
+- Fine-grained relevance distinctions
+- Application-specific scoring needs
 
 ## Scoring Modes
 

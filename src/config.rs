@@ -14,6 +14,41 @@ pub enum ScoringMode {
     Exhaustive,
 }
 
+/// Score scale for relevance judgments
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScoreScale {
+    /// TREC-style 0-3 scale (default)
+    #[default]
+    Trec,
+    /// Custom range specified by min/max
+    Range,
+}
+
+impl std::fmt::Display for ScoreScale {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScoreScale::Trec => write!(f, "trec"),
+            ScoreScale::Range => write!(f, "range"),
+        }
+    }
+}
+
+impl std::str::FromStr for ScoreScale {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "trec" => Ok(ScoreScale::Trec),
+            "range" => Ok(ScoreScale::Range),
+            _ => Err(format!(
+                "Invalid score scale: {}. Use 'trec' or 'range'",
+                s
+            )),
+        }
+    }
+}
+
 impl std::fmt::Display for ScoringMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -133,6 +168,15 @@ pub struct GenerationConfig {
 
     /// Pool size for pooled scoring (top-k docs per query)
     pub pool_size: usize,
+
+    /// Score scale (trec = 0-3, range = custom min/max)
+    pub score_scale: ScoreScale,
+
+    /// Minimum score for custom range (inclusive)
+    pub score_min: u16,
+
+    /// Maximum score for custom range (inclusive)
+    pub score_max: u16,
 }
 
 impl Default for GenerationConfig {
@@ -150,6 +194,9 @@ impl Default for GenerationConfig {
             concurrency: 1,
             scoring_mode: ScoringMode::Source,
             pool_size: 30,
+            score_scale: ScoreScale::Trec,
+            score_min: 0,
+            score_max: 3,
         }
     }
 }

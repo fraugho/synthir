@@ -43,6 +43,9 @@ pub enum LLMError {
     #[error("Invalid fine score output: expected 0-100, got '{0}'")]
     InvalidFineScore(String),
 
+    #[error("Invalid range score output: expected {1}-{2}, got '{0}'")]
+    InvalidRangeScore(String, u16, u16),
+
     #[error("Invalid yes/no output: expected 'yes' or 'no', got '{0}'")]
     InvalidYesNo(String),
 
@@ -62,6 +65,13 @@ pub enum OutputType {
     Document,
     YesNo,
     Topic,
+}
+
+/// Range bounds for custom range scoring
+#[derive(Debug, Clone, Copy)]
+pub struct ScoreRange {
+    pub min: u16,
+    pub max: u16,
 }
 
 /// LLM provider that wraps async-openai for OpenAI-compatible APIs
@@ -255,6 +265,48 @@ impl LLMProvider {
         Ok(score_str.parse()?)
     }
 
+    /// Parse and validate a range score
+    fn parse_range_score(raw: &str, min: u16, max: u16) -> Result<u16, LLMError> {
+        let cleaned = raw.trim();
+        // Extract all digits
+        let num_str: String = cleaned
+            .chars()
+            .filter(|c| c.is_ascii_digit())
+            .take(5) // Max 5 digits for u16
+            .collect();
+        let score: u16 = num_str
+            .parse()
+            .map_err(|_| LLMError::InvalidRangeScore(cleaned.to_string(), min, max))?;
+        if score < min || score > max {
+            return Err(LLMError::InvalidRangeScore(cleaned.to_string(), min, max));
+        }
+        Ok(score)
+    }
+
+    /// Score relevance on custom range scale (returns min-max)
+    pub async fn score_range(&self, prompt: &str, min: u16, max: u16) -> Result<u16> {
+        for attempt in 0..self.max_retries {
+            let response = self.complete(None, prompt).await?;
+
+            match Self::parse_range_score(&response, min, max) {
+                Ok(score) => return Ok(score),
+                Err(e) if attempt < self.max_retries - 1 => {
+                    warn!("Parse failed (attempt {}), retrying: {}", attempt + 1, e);
+                    continue;
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to parse range score after {} attempts: {}",
+                        self.max_retries,
+                        e
+                    ));
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!(LLMError::MaxRetriesExceeded))
+    }
+
     /// Yes/No validation
     pub async fn validate_yes_no(&self, prompt: &str) -> Result<bool> {
         let response = self
@@ -396,6 +448,11 @@ impl MultiEndpointProvider {
     /// Score relevance on fine-grained scale (returns 0-100)
     pub async fn score_fine_grained(&self, prompt: &str) -> Result<u8> {
         self.next_provider().score_fine_grained(prompt).await
+    }
+
+    /// Score relevance on custom range scale (returns min-max)
+    pub async fn score_range(&self, prompt: &str, min: u16, max: u16) -> Result<u16> {
+        self.next_provider().score_range(prompt, min, max).await
     }
 
     /// Yes/No validation

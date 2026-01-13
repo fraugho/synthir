@@ -208,6 +208,41 @@ Output ONLY a number from 0 to 100. Nothing else."#,
     )
 }
 
+/// Prompt for custom range relevance scoring
+/// Allows user-defined min/max score range
+pub fn range_relevance_prompt(query: &str, document_text: &str, min_score: u16, max_score: u16) -> String {
+    let range = max_score - min_score;
+    let low_threshold = min_score + range / 4;
+    let mid_threshold = min_score + range / 2;
+    let high_threshold = min_score + (range * 3) / 4;
+
+    format!(
+        r#"You are a relevance judge for information retrieval.
+
+Query: "{}"
+
+Document:
+"""
+{}
+"""
+
+Rate how relevant this document is to the query on a scale of {}-{}:
+- {}-{}: Not relevant (document does not help answer the query)
+- {}-{}: Marginally relevant (mentions related concepts but doesn't answer)
+- {}-{}: Relevant (partially answers or is useful for the query)
+- {}-{}: Highly relevant (directly and completely answers the query)
+
+Output ONLY a number from {} to {}. Nothing else."#,
+        query, document_text,
+        min_score, max_score,
+        min_score, low_threshold,
+        low_threshold + 1, mid_threshold,
+        mid_threshold + 1, high_threshold,
+        high_threshold + 1, max_score,
+        min_score, max_score
+    )
+}
+
 /// Prompt for LLM-generated topic
 pub fn topic_generation_prompt() -> &'static str {
     r#"Generate a random, specific topic for a document collection.

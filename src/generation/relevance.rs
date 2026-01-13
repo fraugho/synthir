@@ -1,4 +1,5 @@
-use crate::llm::{fine_grained_relevance_prompt, relevance_scoring_prompt, LLMProvider};
+use crate::config::ScoreScale;
+use crate::llm::{fine_grained_relevance_prompt, range_relevance_prompt, relevance_scoring_prompt, LLMProvider};
 use crate::output::{BeirDocument, BeirQuery, Qrel};
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
@@ -16,23 +17,53 @@ use tracing::{debug, info};
 pub struct RelevanceScorer<'a> {
     provider: &'a LLMProvider,
     dry_run: bool,
+    score_scale: ScoreScale,
+    score_min: u16,
+    score_max: u16,
 }
 
 impl<'a> RelevanceScorer<'a> {
     pub fn new(provider: &'a LLMProvider, dry_run: bool) -> Self {
-        Self { provider, dry_run }
+        Self {
+            provider,
+            dry_run,
+            score_scale: ScoreScale::Trec,
+            score_min: 0,
+            score_max: 3,
+        }
+    }
+
+    /// Create a new scorer with custom score scale and range
+    pub fn with_scale(provider: &'a LLMProvider, dry_run: bool, score_scale: ScoreScale, score_min: u16, score_max: u16) -> Self {
+        Self {
+            provider,
+            dry_run,
+            score_scale,
+            score_min,
+            score_max,
+        }
     }
 
     /// Score a single query-document pair
-    pub async fn score_one(&self, query: &BeirQuery, doc: &BeirDocument) -> Result<u8> {
+    pub async fn score_one(&self, query: &BeirQuery, doc: &BeirDocument) -> Result<u16> {
         if self.dry_run {
             // Return a random-ish score for dry run
             let hash = query.id.len() + doc.id.len();
-            return Ok((hash % 4) as u8);
+            let range = self.score_max - self.score_min + 1;
+            return Ok(self.score_min + (hash as u16 % range));
         }
 
-        let prompt = relevance_scoring_prompt(&query.text, &doc.text);
-        self.provider.score_relevance(&prompt).await
+        match self.score_scale {
+            ScoreScale::Trec => {
+                let prompt = relevance_scoring_prompt(&query.text, &doc.text);
+                let score = self.provider.score_relevance(&prompt).await?;
+                Ok(score as u16)
+            }
+            ScoreScale::Range => {
+                let prompt = range_relevance_prompt(&query.text, &doc.text, self.score_min, self.score_max);
+                self.provider.score_range(&prompt, self.score_min, self.score_max).await
+            }
+        }
     }
 
     /// Score queries against their source documents (known relevant pairs)
@@ -188,6 +219,7 @@ impl<'a> RelevanceScorer<'a> {
     }
 
     /// Score a single query-document pair with fine-grained scale (0-100)
+    /// Used internally for pooled scoring cliff detection
     pub async fn score_one_fine(&self, query: &BeirQuery, doc: &BeirDocument) -> Result<u8> {
         if self.dry_run {
             // Return a random-ish score for dry run
@@ -197,6 +229,18 @@ impl<'a> RelevanceScorer<'a> {
 
         let prompt = fine_grained_relevance_prompt(&query.text, &doc.text);
         self.provider.score_fine_grained(&prompt).await
+    }
+
+    /// Score a single query-document pair with range scale
+    pub async fn score_one_range(&self, query: &BeirQuery, doc: &BeirDocument) -> Result<u16> {
+        if self.dry_run {
+            let hash = (query.id.len() * 7 + doc.id.len() * 13) as u16;
+            let range = self.score_max - self.score_min + 1;
+            return Ok(self.score_min + (hash % range));
+        }
+
+        let prompt = range_relevance_prompt(&query.text, &doc.text, self.score_min, self.score_max);
+        self.provider.score_range(&prompt, self.score_min, self.score_max).await
     }
 
     /// Build a BM25 index from documents
@@ -302,13 +346,28 @@ impl<'a> RelevanceScorer<'a> {
     }
 
     /// Convert fine-grained score (0-100) to TREC score (0-3)
-    fn fine_to_trec(score: u8) -> u8 {
+    fn fine_to_trec(score: u8) -> u16 {
         match score {
             0..=25 => 0,
             26..=50 => 1,
             51..=75 => 2,
             76..=100 => 3,
             _ => 3, // Shouldn't happen, but treat as highly relevant
+        }
+    }
+
+    /// Convert fine-grained score (0-100) to custom range
+    fn fine_to_range(score: u8, min: u16, max: u16) -> u16 {
+        // Linear mapping from 0-100 to min-max
+        let range = max - min;
+        min + ((score as u16 * range) / 100)
+    }
+
+    /// Convert fine-grained score to the configured output scale
+    fn fine_to_output(&self, score: u8) -> u16 {
+        match self.score_scale {
+            ScoreScale::Trec => Self::fine_to_trec(score),
+            ScoreScale::Range => Self::fine_to_range(score, self.score_min, self.score_max),
         }
     }
 
@@ -388,19 +447,19 @@ impl<'a> RelevanceScorer<'a> {
                 scored.iter().map(|(_, s)| *s).collect::<Vec<_>>()
             );
 
-            // Step 4: Convert above-cliff docs to TREC scores, below-cliff as hard negatives (0)
+            // Step 4: Convert above-cliff docs to output scores, below-cliff as hard negatives (min)
             // No artificial capping - cliff detection determines relevant vs hard negative
             for (i, (doc_id, fine_score)) in scored.iter().enumerate() {
-                let trec_score = if i < cliff_idx {
-                    Self::fine_to_trec(*fine_score)
+                let output_score = if i < cliff_idx {
+                    self.fine_to_output(*fine_score)
                 } else {
-                    0 // Hard negative
+                    self.score_min // Hard negative
                 };
 
                 all_qrels.push(Qrel {
                     query_id: query.id.clone(),
                     doc_id: doc_id.clone(),
-                    score: trec_score,
+                    score: output_score,
                 });
             }
 
@@ -474,11 +533,11 @@ impl<'a> RelevanceScorer<'a> {
 
             for (query_id, doc_id, result) in batch_results {
                 if let Ok(fine_score) = result {
-                    let trec_score = Self::fine_to_trec(fine_score);
+                    let output_score = self.fine_to_output(fine_score);
                     all_qrels.push(Qrel {
                         query_id,
                         doc_id,
-                        score: trec_score,
+                        score: output_score,
                     });
                 }
                 pb.inc(1);
