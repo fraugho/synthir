@@ -144,6 +144,35 @@ Output ONLY the query, nothing else."#,
     )
 }
 
+/// Prompt for semantic query generation (tests embedding-based retrieval)
+pub fn semantic_query_prompt(document_text: &str) -> String {
+    format!(
+        r#"You generate SEMANTIC search queries that test embedding-based retrieval.
+
+Document:
+"""
+{}
+"""
+
+Generate a query that captures the document's meaning WITHOUT using the same keywords:
+- Use SYNONYMS instead of exact terms (cats -> felines/kittens, car -> automobile/vehicle)
+- PARAPHRASE concepts - do not copy phrases from the document
+- Focus on MEANING, not specific words
+- A BM25/keyword search should FAIL to match this query
+- An embedding search should SUCCEED
+
+Examples of semantic rewording:
+- Doc about "cooking pasta" -> Query: "preparing Italian noodles"
+- Doc about "fixing leaky faucet" -> Query: "repairing dripping tap"
+- Doc about "machine learning models" -> Query: "training AI systems"
+
+The query MUST be relevant but use DIFFERENT vocabulary.
+
+Output ONLY the query, nothing else."#,
+        document_text
+    )
+}
+
 /// Prompt for relevance scoring
 pub fn relevance_scoring_prompt(query: &str, document_text: &str) -> String {
     format!(
@@ -267,6 +296,7 @@ mod tests {
         assert!(!keyword_query_prompt("test doc").is_empty());
         assert!(!academic_query_prompt("test doc").is_empty());
         assert!(!complex_query_prompt("test doc").is_empty());
+        assert!(!semantic_query_prompt("test doc").is_empty());
         assert!(!relevance_scoring_prompt("query", "doc").is_empty());
         assert!(!hard_negative_validation_prompt("query", "doc").is_empty());
         assert!(!topic_generation_prompt().is_empty());

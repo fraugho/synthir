@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use synthir::{
     benchmark::{run_benchmark, BenchmarkConfig},
     checkpoint::{CheckpointManager, GenerationPhase, ProgressState},
-    config::{GenerationConfig, QueryType, RuntimeOptions, ScoreScale, ScoringMode},
+    config::{parse_query_types, GenerationConfig, QueryType, RuntimeOptions, ScoreScale, ScoringMode},
     generation::{DocumentGenerator, QueryGenerator, RelevanceScorer},
     llm::{topic_generation_prompt, LLMProvider, LLMProviderConfig, MultiEndpointProvider},
     meta::{run_meta_generation, MetaConfig},
@@ -47,6 +47,11 @@ enum Commands {
         /// Number of queries per query type
         #[arg(short = 'q', long, default_value = "500")]
         queries_per_type: usize,
+
+        /// Query types to generate (comma-separated: natural,keyword,academic,complex,semantic,mixed)
+        /// If not specified, generates all types.
+        #[arg(long, value_name = "TYPES")]
+        query_types: Option<String>,
 
         /// Output directory
         #[arg(short, long, default_value = "./datasets")]
@@ -228,6 +233,7 @@ async fn main() -> Result<()> {
             corpus,
             documents,
             queries_per_type,
+            query_types,
             output,
             base_url,
             model,
@@ -269,12 +275,19 @@ async fn main() -> Result<()> {
                 anyhow::bail!("--score-min ({}) cannot be greater than --score-max ({})", score_min, score_max);
             }
 
+            // Parse query types if specified
+            let selected_query_types = query_types
+                .map(|s| parse_query_types(&s))
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid query types: {}", e))?;
+
             // Build config
             let config = GenerationConfig {
                 topic: topic.clone().unwrap_or_else(|| "recipes".to_string()),
                 corpus_path: corpus.clone(),
                 document_count: documents,
                 queries_per_type,
+                query_types: selected_query_types,
                 output_dir: output.clone(),
                 base_url: base_url.clone(),
                 model: model.clone(),
@@ -554,14 +567,20 @@ async fn run_generation(
 
         let mut all_query_doc_pairs: Vec<(BeirQuery, String)> = Vec::new();
 
-        // Generate each query type
-        for query_type in QueryType::all_types() {
+        // Determine which query types to generate
+        let types_to_generate: Vec<QueryType> = config
+            .query_types
+            .clone()
+            .unwrap_or_else(QueryType::all_types);
+
+        // Generate each selected query type (excluding Mixed, handled separately)
+        for query_type in types_to_generate.iter().filter(|t| **t != QueryType::Mixed) {
             let pairs = query_gen
                 .generate_for_type_concurrent(
                     &documents,
-                    query_type,
+                    *query_type,
                     config.queries_per_type,
-                    &organizer.queries_path(query_type),
+                    &organizer.queries_path(*query_type),
                     &mut state,
                     &mut checkpoint_mgr,
                     config.concurrency,
@@ -570,16 +589,24 @@ async fn run_generation(
             all_query_doc_pairs.extend(pairs);
         }
 
-        // Generate mixed queries
-        let _mixed_pairs = query_gen
-            .generate_mixed(
-                &documents,
-                config.queries_per_type,
-                &organizer.queries_path(QueryType::Mixed),
-                &mut state,
-                &mut checkpoint_mgr,
-            )
-            .await?;
+        // Generate mixed queries only if Mixed is in the selected types (or all types selected)
+        let generate_mixed = config
+            .query_types
+            .as_ref()
+            .map(|types| types.contains(&QueryType::Mixed))
+            .unwrap_or(true);
+
+        if generate_mixed {
+            let _mixed_pairs = query_gen
+                .generate_mixed(
+                    &documents,
+                    config.queries_per_type,
+                    &organizer.queries_path(QueryType::Mixed),
+                    &mut state,
+                    &mut checkpoint_mgr,
+                )
+                .await?;
+        }
 
         state.advance_phase();
         checkpoint_mgr.force_save(&state)?;
@@ -619,14 +646,14 @@ async fn run_generation(
             }
         };
 
-        // Write qrels for each query type
-        for query_type in QueryType::all_types() {
+        // Write qrels for each generated query type
+        for query_type in types_to_generate.iter().filter(|t| **t != QueryType::Mixed) {
             let type_qrels: Vec<_> = qrels
                 .iter()
                 .filter(|q| q.query_id.starts_with(query_type.as_str()))
                 .cloned()
                 .collect();
-            write_qrels(&organizer.qrels_path(query_type), &type_qrels)?;
+            write_qrels(&organizer.qrels_path(*query_type), &type_qrels)?;
         }
 
         state.advance_phase();
@@ -687,15 +714,23 @@ async fn run_generation(
     }
 
     // Write metadata
+    let all_types_with_mixed = {
+        let mut types = QueryType::all_types();
+        types.push(QueryType::Mixed);
+        types
+    };
+    let generated_types = config.query_types.clone().unwrap_or(all_types_with_mixed);
+
     let metadata = DatasetMetadata {
         topic: topic_config.name.clone(),
         document_count: documents.len(),
         query_counts: QueryCounts {
-            natural: config.queries_per_type,
-            keyword: config.queries_per_type,
-            academic: config.queries_per_type,
-            complex: config.queries_per_type,
-            mixed: config.queries_per_type,
+            natural: if generated_types.contains(&QueryType::Natural) { config.queries_per_type } else { 0 },
+            keyword: if generated_types.contains(&QueryType::Keyword) { config.queries_per_type } else { 0 },
+            academic: if generated_types.contains(&QueryType::Academic) { config.queries_per_type } else { 0 },
+            complex: if generated_types.contains(&QueryType::Complex) { config.queries_per_type } else { 0 },
+            semantic: if generated_types.contains(&QueryType::Semantic) { config.queries_per_type } else { 0 },
+            mixed: if generated_types.contains(&QueryType::Mixed) { config.queries_per_type } else { 0 },
         },
         generation_timestamp: chrono_lite_timestamp(),
         model_used: config.model.clone(),

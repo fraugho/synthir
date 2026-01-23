@@ -2,7 +2,7 @@ use crate::checkpoint::{CheckpointManager, ProgressState};
 use crate::config::QueryType;
 use crate::llm::{
     academic_query_prompt, complex_query_prompt, keyword_query_prompt, natural_query_prompt,
-    LLMProvider,
+    semantic_query_prompt, LLMProvider,
 };
 use crate::output::{append_query, BeirDocument, BeirQuery};
 use anyhow::Result;
@@ -50,6 +50,7 @@ impl<'a> QueryGenerator<'a> {
             QueryType::Keyword => keyword_query_prompt(&doc.text),
             QueryType::Academic => academic_query_prompt(&doc.text),
             QueryType::Complex => complex_query_prompt(&doc.text),
+            QueryType::Semantic => semantic_query_prompt(&doc.text),
             QueryType::Mixed => {
                 // Should not be called directly for mixed type
                 unreachable!("Mixed query type should be handled by generate_mixed")
@@ -236,6 +237,7 @@ impl<'a> QueryGenerator<'a> {
                     QueryType::Keyword => keyword_query_prompt(&doc.text),
                     QueryType::Academic => academic_query_prompt(&doc.text),
                     QueryType::Complex => complex_query_prompt(&doc.text),
+                    QueryType::Semantic => semantic_query_prompt(&doc.text),
                     QueryType::Mixed => unreachable!(),
                 };
                 self.provider.generate_query(&prompt).await?

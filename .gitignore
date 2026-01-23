@@ -5,3 +5,5 @@
 *.checkpoint.json
 output_small/
 user-file-dataset/
+*.log
+*.zip

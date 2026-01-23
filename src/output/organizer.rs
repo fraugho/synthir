@@ -21,6 +21,7 @@ pub struct QueryCounts {
     pub keyword: usize,
     pub academic: usize,
     pub complex: usize,
+    pub semantic: usize,
     pub mixed: usize,
 }
 

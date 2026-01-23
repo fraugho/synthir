@@ -84,6 +84,8 @@ pub enum QueryType {
     Academic,
     /// Multi-hop reasoning queries (e.g., "recipes similar to carbonara")
     Complex,
+    /// Semantic queries using synonyms/paraphrasing (tests embedding-based retrieval)
+    Semantic,
     /// Mix of all query types
     Mixed,
 }
@@ -95,6 +97,7 @@ impl QueryType {
             QueryType::Keyword,
             QueryType::Academic,
             QueryType::Complex,
+            QueryType::Semantic,
         ]
     }
 
@@ -104,6 +107,7 @@ impl QueryType {
             QueryType::Keyword => "keyword",
             QueryType::Academic => "academic",
             QueryType::Complex => "complex",
+            QueryType::Semantic => "semantic",
             QueryType::Mixed => "mixed",
         }
     }
@@ -124,10 +128,29 @@ impl std::str::FromStr for QueryType {
             "keyword" => Ok(QueryType::Keyword),
             "academic" => Ok(QueryType::Academic),
             "complex" => Ok(QueryType::Complex),
+            "semantic" => Ok(QueryType::Semantic),
             "mixed" => Ok(QueryType::Mixed),
             _ => Err(format!("Invalid query type: {}", s)),
         }
     }
+}
+
+/// Parse a comma-separated list of query types
+pub fn parse_query_types(s: &str) -> Result<Vec<QueryType>, String> {
+    let mut types = Vec::new();
+    for part in s.split(',') {
+        let trimmed = part.trim();
+        if !trimmed.is_empty() {
+            let qt: QueryType = trimmed.parse()?;
+            if !types.contains(&qt) {
+                types.push(qt);
+            }
+        }
+    }
+    if types.is_empty() {
+        return Err("No valid query types specified".to_string());
+    }
+    Ok(types)
 }
 
 /// Main configuration for dataset generation
@@ -144,6 +167,9 @@ pub struct GenerationConfig {
 
     /// Number of queries per query type
     pub queries_per_type: usize,
+
+    /// Which query types to generate (if None, generate all)
+    pub query_types: Option<Vec<QueryType>>,
 
     /// Output directory
     pub output_dir: PathBuf,
@@ -186,6 +212,7 @@ impl Default for GenerationConfig {
             corpus_path: None,
             document_count: 100,
             queries_per_type: 500,
+            query_types: None,
             output_dir: PathBuf::from("./datasets"),
             base_url: "https://api.openai.com/v1".to_string(),
             model: "gpt-4".to_string(),
