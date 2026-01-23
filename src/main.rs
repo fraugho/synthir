@@ -85,6 +85,10 @@ enum Commands {
         #[arg(long)]
         no_hard_negatives: bool,
 
+        /// Skip creating merged and combined output directories
+        #[arg(long)]
+        no_merged: bool,
+
         /// Batch size for checkpointing
         #[arg(long, default_value = "50")]
         batch_size: usize,
@@ -242,6 +246,7 @@ async fn main() -> Result<()> {
             dry_run,
             verbose,
             no_hard_negatives,
+            no_merged,
             batch_size,
             concurrency,
             scoring_mode,
@@ -281,9 +286,23 @@ async fn main() -> Result<()> {
                 .transpose()
                 .map_err(|e| anyhow::anyhow!("Invalid query types: {}", e))?;
 
+            // Determine topic: use provided topic, or derive from output directory name when using existing corpus
+            let effective_topic = topic.clone().unwrap_or_else(|| {
+                if corpus.is_some() {
+                    // When using existing corpus, use output directory name as topic (no subdirectory)
+                    output
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "dataset".to_string())
+                } else {
+                    "recipes".to_string()
+                }
+            });
+
             // Build config
             let config = GenerationConfig {
-                topic: topic.clone().unwrap_or_else(|| "recipes".to_string()),
+                topic: effective_topic,
                 corpus_path: corpus.clone(),
                 document_count: documents,
                 queries_per_type,
@@ -306,7 +325,7 @@ async fn main() -> Result<()> {
                 verbose,
                 resume,
                 api_key: api_key.clone(),
-                ..Default::default()
+                no_merged,
             };
 
             // Get or generate topic config
@@ -441,6 +460,14 @@ async fn get_or_generate_topic(
     config: &GenerationConfig,
     options: &RuntimeOptions,
 ) -> Result<TopicConfig> {
+    // When using existing corpus, accept any topic name (no document generation needed)
+    if config.corpus_path.is_some() {
+        return Ok(create_custom_topic(
+            config.topic.clone(),
+            format!("Existing corpus: {}", config.topic),
+        ));
+    }
+
     if config.topic == "llm-generated" {
         info!("Generating random topic with LLM...");
 
@@ -510,8 +537,23 @@ async fn run_generation(
     // Get first provider for generators that need single provider reference
     let provider = multi_provider.first();
 
-    let organizer = OutputOrganizer::new(config.output_dir.clone(), topic_config.name.clone());
-    organizer.create_structure()?;
+    // Use flat output (no topic subdirectory) when using existing corpus
+    let organizer = if config.corpus_path.is_some() {
+        OutputOrganizer::new_flat(config.output_dir.clone(), topic_config.name.clone())
+    } else {
+        OutputOrganizer::new(config.output_dir.clone(), topic_config.name.clone())
+    };
+
+    // Create directory structure for only the selected query types
+    let types_to_create: Vec<QueryType> = config
+        .query_types
+        .clone()
+        .unwrap_or_else(|| {
+            let mut all = QueryType::all_types();
+            all.push(QueryType::Mixed);
+            all
+        });
+    organizer.create_structure_for_types(&types_to_create, config.generate_hard_negatives, !options.no_merged)?;
 
     // Load or create progress state
     let mut state = if options.resume {
@@ -659,8 +701,8 @@ async fn run_generation(
         state.advance_phase();
         checkpoint_mgr.force_save(&state)?;
 
-        // Phase 4: Hard Negative Mining (optional)
-        if config.generate_hard_negatives {
+        // Phase 4: Hard Negative Mining (optional, requires merged output)
+        if config.generate_hard_negatives && !options.no_merged {
             info!("Mining hard negatives...");
             let miner = HardNegativeMiner::new(&provider, options.dry_run);
 
@@ -689,25 +731,32 @@ async fn run_generation(
             )?;
         }
 
-        // Write general merged (without hard negatives)
-        let all_query_refs: Vec<_> = all_query_doc_pairs.iter().map(|(q, _)| q.clone()).collect();
-        write_queries(
-            &organizer.general_merged_dir().join("queries.jsonl"),
-            &all_query_refs,
-        )?;
-        write_qrels(&organizer.general_merged_dir().join("qrels.tsv"), &qrels)?;
+        // Write merged and combined folders only if not disabled
+        if !options.no_merged {
+            // Write general merged (without hard negatives)
+            let all_query_refs: Vec<_> = all_query_doc_pairs.iter().map(|(q, _)| q.clone()).collect();
+            write_queries(
+                &organizer.general_merged_dir().join("queries.jsonl"),
+                &all_query_refs,
+            )?;
+            write_qrels(&organizer.general_merged_dir().join("qrels.tsv"), &qrels)?;
 
-        // Write combined folder (corpus + all queries + all qrels in one place)
-        info!("Writing combined output folder...");
-        std::fs::copy(
-            organizer.corpus_path(),
-            organizer.combined_dir().join("corpus.jsonl"),
-        )?;
-        write_queries(
-            &organizer.combined_dir().join("queries.jsonl"),
-            &all_query_refs,
-        )?;
-        write_qrels(&organizer.combined_dir().join("qrels.tsv"), &qrels)?;
+            // Write combined folder (corpus + all queries + all qrels in one place)
+            info!("Writing combined output folder...");
+            // Use original corpus path if provided, otherwise use organizer's corpus path
+            let corpus_source = config.corpus_path.as_ref()
+                .map(|p| p.clone())
+                .unwrap_or_else(|| organizer.corpus_path());
+            std::fs::copy(
+                &corpus_source,
+                organizer.combined_dir().join("corpus.jsonl"),
+            )?;
+            write_queries(
+                &organizer.combined_dir().join("queries.jsonl"),
+                &all_query_refs,
+            )?;
+            write_qrels(&organizer.combined_dir().join("qrels.tsv"), &qrels)?;
+        }
 
         state.advance_phase();
         checkpoint_mgr.force_save(&state)?;

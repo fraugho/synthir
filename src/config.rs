@@ -242,4 +242,7 @@ pub struct RuntimeOptions {
 
     /// API key (not persisted)
     pub api_key: String,
+
+    /// Skip creating merged and combined output directories
+    pub no_merged: bool,
 }

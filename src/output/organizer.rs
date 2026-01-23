@@ -29,16 +29,27 @@ pub struct QueryCounts {
 pub struct OutputOrganizer {
     base_dir: PathBuf,
     topic: String,
+    /// If true, output goes directly to base_dir without topic subdirectory
+    flat_output: bool,
 }
 
 impl OutputOrganizer {
     pub fn new(base_dir: PathBuf, topic: String) -> Self {
-        Self { base_dir, topic }
+        Self { base_dir, topic, flat_output: false }
+    }
+
+    /// Create organizer that outputs directly to base_dir without topic subdirectory
+    pub fn new_flat(base_dir: PathBuf, topic: String) -> Self {
+        Self { base_dir, topic, flat_output: true }
     }
 
     /// Get the topic directory
     pub fn topic_dir(&self) -> PathBuf {
-        self.base_dir.join(&self.topic)
+        if self.flat_output {
+            self.base_dir.clone()
+        } else {
+            self.base_dir.join(&self.topic)
+        }
     }
 
     /// Get the corpus file path
@@ -48,7 +59,7 @@ impl OutputOrganizer {
 
     /// Get queries directory for a query type
     pub fn queries_dir(&self, query_type: QueryType) -> PathBuf {
-        self.topic_dir().join("queries").join(query_type.as_str())
+        self.topic_dir().join(query_type.as_str())
     }
 
     /// Get queries file path for a query type
@@ -91,21 +102,31 @@ impl OutputOrganizer {
         self.base_dir.join("metadata.json")
     }
 
-    /// Create the full directory structure
+    /// Create the full directory structure for all query types
     pub fn create_structure(&self) -> Result<()> {
+        let mut all_types = QueryType::all_types();
+        all_types.push(QueryType::Mixed);
+        self.create_structure_for_types(&all_types, true, true)
+    }
+
+    /// Create directory structure for specific query types only
+    pub fn create_structure_for_types(&self, query_types: &[QueryType], include_hard_negatives: bool, include_merged: bool) -> Result<()> {
         // Create topic directory
         fs::create_dir_all(self.topic_dir())?;
 
-        // Create query type directories
-        for query_type in QueryType::all_types() {
-            fs::create_dir_all(self.queries_dir(query_type))?;
+        // Create only the requested query type directories
+        for query_type in query_types {
+            fs::create_dir_all(self.queries_dir(*query_type))?;
         }
-        fs::create_dir_all(self.queries_dir(QueryType::Mixed))?;
 
-        // Create merged directories
-        fs::create_dir_all(self.general_merged_dir())?;
-        fs::create_dir_all(self.hard_negatives_merged_dir())?;
-        fs::create_dir_all(self.combined_dir())?;
+        // Create merged/combined directories only if requested
+        if include_merged {
+            fs::create_dir_all(self.general_merged_dir())?;
+            if include_hard_negatives {
+                fs::create_dir_all(self.hard_negatives_merged_dir())?;
+            }
+            fs::create_dir_all(self.combined_dir())?;
+        }
 
         Ok(())
     }
