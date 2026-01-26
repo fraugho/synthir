@@ -328,6 +328,7 @@ pub async fn run_meta_generation(config: MetaConfig) -> Result<()> {
                 academic: config.queries_per_type,
                 complex: config.queries_per_type,
                 semantic: config.queries_per_type,
+                basic: config.queries_per_type,
                 mixed: config.queries_per_type,
             },
             generation_timestamp: chrono_lite_timestamp(),

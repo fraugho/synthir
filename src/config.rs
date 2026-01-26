@@ -84,8 +84,10 @@ pub enum QueryType {
     Academic,
     /// Multi-hop reasoning queries (e.g., "recipes similar to carbonara")
     Complex,
-    /// Semantic queries using synonyms/paraphrasing (tests embedding-based retrieval)
+    /// Semantic queries using synonyms/paraphrasing - ZERO lexical overlap (tests embedding-based retrieval)
     Semantic,
+    /// Basic queries with partial keyword matching - SOME lexical overlap allowed
+    Basic,
     /// Mix of all query types
     Mixed,
 }
@@ -98,6 +100,7 @@ impl QueryType {
             QueryType::Academic,
             QueryType::Complex,
             QueryType::Semantic,
+            QueryType::Basic,
         ]
     }
 
@@ -108,6 +111,7 @@ impl QueryType {
             QueryType::Academic => "academic",
             QueryType::Complex => "complex",
             QueryType::Semantic => "semantic",
+            QueryType::Basic => "basic",
             QueryType::Mixed => "mixed",
         }
     }
@@ -129,6 +133,7 @@ impl std::str::FromStr for QueryType {
             "academic" => Ok(QueryType::Academic),
             "complex" => Ok(QueryType::Complex),
             "semantic" => Ok(QueryType::Semantic),
+            "basic" => Ok(QueryType::Basic),
             "mixed" => Ok(QueryType::Mixed),
             _ => Err(format!("Invalid query type: {}", s)),
         }

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use synthir::{
     benchmark::{run_benchmark, BenchmarkConfig},
     checkpoint::{CheckpointManager, GenerationPhase, ProgressState},
@@ -11,7 +11,8 @@ use synthir::{
     mining::HardNegativeMiner,
     output::{
         read_corpus, write_qrels, write_queries, BeirQuery, DatasetMetadata, OutputOrganizer,
-        QueryCounts,
+        QueryCounts, detect_dataset, read_corpus_auto, analyze_qrels_splits, DatasetFormat,
+        write_ocr_queries, Qrel,
     },
     topics::{create_custom_topic, get_builtin_topics, get_topic, TopicConfig},
     utils::{display_dry_run_info, display_topics, display_verbose_start},
@@ -225,6 +226,57 @@ enum Commands {
 
     /// List available topics
     Topics,
+
+    /// Remix an existing dataset with new queries (clone corpus, replace queries/qrels)
+    Remix {
+        /// Path to source dataset directory (auto-detects BEIR or OCR format)
+        #[arg(short, long)]
+        source: PathBuf,
+
+        /// Name for the output dataset (e.g., "semantic_nfcorpus"). Required unless --in-place is used.
+        #[arg(short = 'n', long)]
+        output_name: Option<String>,
+
+        /// Output directory (dataset will be created as subdirectory)
+        #[arg(short, long, default_value = "./datasets")]
+        output: PathBuf,
+
+        /// Replace queries/qrels in-place (modifies source dataset directly)
+        #[arg(long)]
+        in_place: bool,
+
+        /// Query types to generate (comma-separated: natural,keyword,academic,complex,semantic,basic,mixed)
+        #[arg(long, value_name = "TYPES", default_value = "semantic")]
+        query_types: String,
+
+        /// Number of queries per split (if source has train/dev/test, preserves ratio)
+        #[arg(short = 'q', long)]
+        queries_per_type: Option<usize>,
+
+        /// LLM API base URL
+        #[arg(long, default_value = "https://api.openai.com/v1")]
+        base_url: String,
+
+        /// Model identifier
+        #[arg(short, long, default_value = "gpt-4")]
+        model: String,
+
+        /// API key (or set OPENAI_API_KEY env var)
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Number of concurrent LLM requests
+        #[arg(short = 'j', long, default_value = "1")]
+        concurrency: usize,
+
+        /// Verbose output
+        #[arg(short, long)]
+        verbose: bool,
+
+        /// Dry run - show what would happen without LLM calls
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[tokio::main]
@@ -450,6 +502,63 @@ async fn main() -> Result<()> {
                 .collect();
             topic_list.sort_by(|a, b| a.0.cmp(&b.0));
             display_topics(&topic_list);
+        }
+
+        Commands::Remix {
+            source,
+            output_name,
+            output,
+            in_place,
+            query_types,
+            queries_per_type,
+            base_url,
+            model,
+            api_key,
+            concurrency,
+            verbose,
+            dry_run,
+        } => {
+            let level = if verbose { Level::DEBUG } else { Level::INFO };
+            let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
+            tracing::subscriber::set_global_default(subscriber)?;
+
+            // Validate: must specify either --output-name or --in-place
+            if output_name.is_none() && !in_place {
+                anyhow::bail!("Must specify either --output-name or --in-place");
+            }
+
+            // API key only required for non-dry-run
+            let api_key = if dry_run {
+                api_key
+                    .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+                    .unwrap_or_default()
+            } else {
+                api_key
+                    .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+                    .context("API key required: use --api-key or set OPENAI_API_KEY")?
+            };
+
+            let selected_query_types = parse_query_types(&query_types)
+                .map_err(|e| anyhow::anyhow!("Invalid query types: {}", e))?;
+
+            run_remix(
+                source,
+                output_name,
+                output,
+                in_place,
+                selected_query_types,
+                queries_per_type,
+                base_url,
+                model,
+                api_key,
+                concurrency,
+                dry_run,
+            )
+            .await?;
+
+            if !dry_run {
+                info!("Dataset remix complete!");
+            }
         }
     }
 
@@ -779,6 +888,7 @@ async fn run_generation(
             academic: if generated_types.contains(&QueryType::Academic) { config.queries_per_type } else { 0 },
             complex: if generated_types.contains(&QueryType::Complex) { config.queries_per_type } else { 0 },
             semantic: if generated_types.contains(&QueryType::Semantic) { config.queries_per_type } else { 0 },
+            basic: if generated_types.contains(&QueryType::Basic) { config.queries_per_type } else { 0 },
             mixed: if generated_types.contains(&QueryType::Mixed) { config.queries_per_type } else { 0 },
         },
         generation_timestamp: chrono_lite_timestamp(),
@@ -859,4 +969,294 @@ fn chrono_lite_timestamp() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     format!("{}", duration.as_secs())
+}
+
+/// Remix an existing dataset with new queries
+async fn run_remix(
+    source: PathBuf,
+    output_name: Option<String>,
+    output_dir: PathBuf,
+    in_place: bool,
+    query_types: Vec<QueryType>,
+    queries_per_type: Option<usize>,
+    base_url: String,
+    model: String,
+    api_key: String,
+    concurrency: usize,
+    dry_run: bool,
+) -> Result<()> {
+    // Detect source dataset format
+    info!("Detecting dataset format for {}...", source.display());
+    let dataset_info = detect_dataset(&source)?;
+    info!(
+        "Detected {} format{}",
+        dataset_info.format,
+        dataset_info
+            .locale
+            .as_ref()
+            .map(|l| format!(" (locale: {})", l))
+            .unwrap_or_default()
+    );
+
+    // Analyze existing qrels splits
+    let splits = analyze_qrels_splits(&dataset_info)?;
+    let total_qrels: usize = splits.iter().map(|s| s.count).sum();
+
+    info!(
+        "Found {} qrels split(s): {}",
+        splits.len(),
+        splits
+            .iter()
+            .map(|s| format!("{} ({})", s.name, s.count))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    // Determine queries per type (use provided or derive from source)
+    let queries_count = queries_per_type.unwrap_or_else(|| {
+        // Use total qrels count as baseline, divided by number of query types
+        let per_type = total_qrels / query_types.len().max(1);
+        per_type.max(10) // Minimum 10 queries per type
+    });
+
+    info!(
+        "Will generate {} queries per type for types: {:?}",
+        queries_count,
+        query_types.iter().map(|t| t.as_str()).collect::<Vec<_>>()
+    );
+
+    // Determine destination directory
+    let (dest_dir, effective_dest) = if in_place {
+        // In-place mode: modify source directly
+        let effective = if let Some(locale) = &dataset_info.locale {
+            source.join(locale)
+        } else {
+            source.clone()
+        };
+        (source.clone(), effective)
+    } else {
+        // Clone mode: create new dataset
+        let name = output_name.as_ref().unwrap();
+        let dest = output_dir.join(name);
+        let effective = if let Some(locale) = &dataset_info.locale {
+            dest.join(locale)
+        } else {
+            dest.clone()
+        };
+        (dest, effective)
+    };
+
+    if dry_run {
+        if in_place {
+            info!("DRY RUN - Would modify in-place: {}", dest_dir.display());
+        } else {
+            info!("DRY RUN - Would create: {}", dest_dir.display());
+        }
+        info!("  Format: {}", dataset_info.format);
+        info!("  Corpus: {} documents", read_corpus_auto(&dataset_info)?.len());
+        info!("  Query types: {:?}", query_types);
+        info!("  Queries per type: {}", queries_count);
+        if !splits.is_empty() {
+            info!("  Will preserve splits: {:?}", splits.iter().map(|s| &s.name).collect::<Vec<_>>());
+        }
+        return Ok(());
+    }
+
+    // For clone mode, create directory and copy corpus
+    if !in_place {
+        std::fs::create_dir_all(&effective_dest)?;
+
+        // Copy corpus file
+        let dest_corpus_path = match dataset_info.format {
+            DatasetFormat::Beir => effective_dest.join("corpus.jsonl"),
+            DatasetFormat::Ocr => effective_dest.join("label.json"),
+        };
+        std::fs::copy(&dataset_info.corpus_path, &dest_corpus_path)?;
+        info!("Copied corpus to {}", dest_corpus_path.display());
+
+        // Copy images directory for OCR format if it exists
+        if dataset_info.format == DatasetFormat::Ocr {
+            let source_images = dataset_info.corpus_path.parent().unwrap().join("images");
+            if source_images.exists() {
+                let dest_images = effective_dest.join("images");
+                copy_dir_recursive(&source_images, &dest_images)?;
+                info!("Copied images directory");
+            }
+        }
+    } else {
+        info!("In-place mode: will replace queries and qrels in {}", effective_dest.display());
+    }
+
+    // Load documents
+    let documents = read_corpus_auto(&dataset_info)?;
+    info!("Loaded {} documents", documents.len());
+
+    // Create LLM provider
+    let provider = LLMProvider::new(LLMProviderConfig {
+        base_url,
+        api_key,
+        model: model.clone(),
+        max_retries: 3,
+    })?;
+
+    // Generate queries
+    let query_gen = QueryGenerator::new(&provider, false);
+    let mut all_queries: Vec<BeirQuery> = Vec::new();
+    let mut all_qrels: Vec<Qrel> = Vec::new();
+
+    // Create minimal config and state for query generation
+    let config = GenerationConfig {
+        queries_per_type: queries_count,
+        output_dir: effective_dest.clone(),
+        concurrency,
+        ..Default::default()
+    };
+    let mut state = ProgressState::new(config.clone());
+    let mut checkpoint_mgr = CheckpointManager::new(effective_dest.clone(), 50);
+
+    for query_type in &query_types {
+        if *query_type == QueryType::Mixed {
+            continue; // Handle mixed separately
+        }
+
+        info!("Generating {} queries of type '{}'...", queries_count, query_type);
+
+        let temp_queries_path = effective_dest.join(format!("temp_{}_queries.jsonl", query_type.as_str()));
+
+        let pairs = query_gen
+            .generate_for_type_concurrent(
+                &documents,
+                *query_type,
+                queries_count,
+                &temp_queries_path,
+                &mut state,
+                &mut checkpoint_mgr,
+                concurrency,
+            )
+            .await?;
+
+        all_queries.extend(pairs.iter().map(|(q, _)| q.clone()));
+
+        // Score relevance
+        let scorer = RelevanceScorer::new(&provider, false);
+        let qrels = scorer
+            .score_source_pairs_concurrent(&pairs, &documents, concurrency)
+            .await?;
+        all_qrels.extend(qrels);
+
+        // Clean up temp file
+        let _ = std::fs::remove_file(&temp_queries_path);
+    }
+
+    // Handle mixed queries if requested
+    if query_types.contains(&QueryType::Mixed) {
+        info!("Generating {} mixed queries...", queries_count);
+        let temp_mixed_path = effective_dest.join("temp_mixed_queries.jsonl");
+
+        let mixed_pairs = query_gen
+            .generate_mixed(
+                &documents,
+                queries_count,
+                &temp_mixed_path,
+                &mut state,
+                &mut checkpoint_mgr,
+            )
+            .await?;
+
+        // Convert 3-tuple to 2-tuple for scoring
+        let pairs: Vec<(BeirQuery, String)> = mixed_pairs
+            .iter()
+            .map(|(q, doc_id, _)| (q.clone(), doc_id.clone()))
+            .collect();
+
+        all_queries.extend(pairs.iter().map(|(q, _)| q.clone()));
+
+        let scorer = RelevanceScorer::new(&provider, false);
+        let qrels = scorer
+            .score_source_pairs_concurrent(&pairs, &documents, concurrency)
+            .await?;
+        all_qrels.extend(qrels);
+
+        let _ = std::fs::remove_file(&temp_mixed_path);
+    }
+
+    // Write output based on format
+    match dataset_info.format {
+        DatasetFormat::Beir => {
+            // Write queries
+            let queries_path = effective_dest.join("queries.jsonl");
+            write_queries(&queries_path, &all_queries)?;
+            info!("Wrote {} queries to {}", all_queries.len(), queries_path.display());
+
+            // Write qrels - preserve split structure if original had splits
+            if splits.len() > 1 {
+                // Create qrels directory and split proportionally
+                let qrels_dir = effective_dest.join("qrels");
+                std::fs::create_dir_all(&qrels_dir)?;
+
+                let total_original: usize = splits.iter().map(|s| s.count).sum();
+                let mut offset = 0;
+
+                for split in &splits {
+                    let ratio = split.count as f64 / total_original as f64;
+                    let split_count = (all_qrels.len() as f64 * ratio).round() as usize;
+                    let split_count = split_count.min(all_qrels.len() - offset);
+
+                    let split_qrels: Vec<_> = all_qrels[offset..offset + split_count].to_vec();
+                    let split_path = qrels_dir.join(format!("{}.tsv", split.name));
+                    write_qrels(&split_path, &split_qrels)?;
+                    info!(
+                        "Wrote {} qrels to {} (preserving {:.1}% ratio)",
+                        split_qrels.len(),
+                        split_path.display(),
+                        ratio * 100.0
+                    );
+
+                    offset += split_count;
+                }
+            } else {
+                // Single qrels file
+                let qrels_path = effective_dest.join("qrels.tsv");
+                write_qrels(&qrels_path, &all_qrels)?;
+                info!("Wrote {} qrels to {}", all_qrels.len(), qrels_path.display());
+            }
+        }
+        DatasetFormat::Ocr => {
+            // Write in OCR format (queries.json)
+            let queries_path = effective_dest.join("queries.json");
+            write_ocr_queries(&queries_path, &all_queries, &all_qrels)?;
+            info!(
+                "Wrote {} queries with {} relevance judgments to {}",
+                all_queries.len(),
+                all_qrels.len(),
+                queries_path.display()
+            );
+        }
+    }
+
+    if in_place {
+        info!("Replaced queries and qrels in-place at {}", dest_dir.display());
+    } else {
+        info!("Created remixed dataset at {}", dest_dir.display());
+    }
+    Ok(())
+}
+
+/// Recursively copy a directory
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+
+    Ok(())
 }

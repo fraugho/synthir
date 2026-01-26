@@ -5,7 +5,9 @@ A Rust CLI tool that generates high-quality synthetic information retrieval data
 ## Features
 
 - **Realistic Query Generation**: Generates queries that mimic actual user search patterns, not polished academic queries
-- **Multiple Query Types**: Natural, keyword, academic, complex, and mixed query styles
+- **Multiple Query Types**: Natural, keyword, academic, complex, semantic, basic, and mixed query styles
+- **Dataset Remixing**: Clone existing datasets and replace queries/qrels with new types
+- **OCR Dataset Support**: Auto-detects and handles both BEIR and OCR (GoodNotes-style) formats
 - **Concurrent Generation**: Parallel LLM requests with configurable concurrency (`-j` flag)
 - **Benchmark Mode**: Find optimal concurrency settings for your LLM endpoint
 - **Meta Mode**: Generate multiple datasets automatically with LLM-generated topics
@@ -49,6 +51,12 @@ synthir benchmark \
 
 # Generate multiple datasets
 synthir meta -t 5 -d 100 -q 500 -j 8 --api-key YOUR_API_KEY
+
+# Remix an existing dataset with semantic queries
+synthir remix --source ./NFCorpus --output-name semantic_nfcorpus --api-key YOUR_KEY
+
+# Replace queries in-place (for fixing malformed datasets)
+synthir remix --source ./GoodNotesOCR --in-place --query-types basic --api-key YOUR_KEY
 ```
 
 ## Commands
@@ -65,6 +73,7 @@ synthir generate [OPTIONS]
 | `-c, --corpus` | Path to existing corpus.jsonl | - |
 | `-d, --documents` | Number of documents to generate | 100 |
 | `-q, --queries-per-type` | Queries per query type | 500 |
+| `--query-types` | Query types (comma-separated) | all |
 | `-o, --output` | Output directory | ./datasets |
 | `-m, --model` | Model identifier | gpt-4 |
 | `--base-url` | LLM API base URL | https://api.openai.com/v1 |
@@ -79,6 +88,48 @@ synthir generate [OPTIONS]
 | `--score-min` | Minimum score for custom range | 0 |
 | `--score-max` | Maximum score for custom range | 100 |
 | `-v, --verbose` | Verbose output | false |
+
+### `remix` - Remix Existing Dataset with New Queries
+
+Clone an existing dataset and replace its queries/qrels, or modify in-place.
+
+```bash
+synthir remix [OPTIONS] --source <SOURCE>
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-s, --source` | Path to source dataset (auto-detects format) | required |
+| `-n, --output-name` | Name for output dataset | - |
+| `--in-place` | Modify source dataset directly | false |
+| `-o, --output` | Output directory for cloned dataset | ./datasets |
+| `--query-types` | Query types to generate | semantic |
+| `-q, --queries-per-type` | Number of queries (or auto from source) | - |
+| `-j, --concurrency` | Concurrent LLM requests | 1 |
+| `--dry-run` | Preview what would happen | false |
+
+**Examples:**
+
+```bash
+# Create semantic variant of NFCorpus
+synthir remix --source ./NFCorpus --output-name semantic_nfcorpus --api-key YOUR_KEY
+
+# Create basic (partial keyword) variant
+synthir remix --source ./NFCorpus --output-name basic_nfcorpus --query-types basic --api-key YOUR_KEY
+
+# Replace queries in-place (useful for fixing malformed datasets)
+synthir remix --source ./GoodNotesOCR --in-place --query-types semantic --api-key YOUR_KEY
+
+# Preview changes without executing
+synthir remix --source ./NFCorpus --output-name test --dry-run
+```
+
+**Supported Formats:**
+
+- **BEIR**: `corpus.jsonl`, `queries.jsonl`, `qrels/*.tsv`
+- **OCR**: `label.json`, `queries.json` (GoodNotes-style)
+
+The tool auto-detects the format and preserves qrels splits (train/dev/test) with original ratios.
 
 ### `queries` - Generate Queries for Existing Corpus
 
@@ -170,7 +221,23 @@ Built-in topics:
 | `keyword` | Messy user searches (may have typos) | "recipie chicken easy" |
 | `academic` | Formal, detailed queries | "What is the correlation between X and Y?" |
 | `complex` | Multi-hop reasoning | "difference between sourdough and regular bread" |
+| `semantic` | Zero lexical overlap (tests embeddings) | Doc: "Emperor Penguin Encyclopedia" → "bird books" |
+| `basic` | Partial keyword matching | Doc: "Emperor Penguin Encyclopedia" → "penguin book" |
 | `mixed` | Random mix of all types | - |
+
+### Semantic vs Basic Query Types
+
+Both `semantic` and `basic` are designed to test retrieval beyond exact keyword matching:
+
+**Semantic** (zero lexical overlap):
+- BM25/TF-IDF should **fail** to find these
+- Only embedding-based retrieval should succeed
+- Example: "Encyclopedia of Emperor Penguins" → "bird books" or "antarctic wildlife reference"
+
+**Basic** (partial keyword overlap):
+- BM25/TF-IDF should find these, but not as top result
+- Simulates lazy/abbreviated searches
+- Example: "Encyclopedia of Emperor Penguins" → "penguin book" (dropped "emperor", "encyclopedia")
 
 ## Output Format (BEIR Compatible)
 
@@ -185,6 +252,8 @@ datasets/
     │   ├── keyword/
     │   ├── academic/
     │   ├── complex/
+    │   ├── semantic/
+    │   ├── basic/
     │   └── mixed/
     ├── merged/
     │   ├── general/          # All queries merged
@@ -381,6 +450,8 @@ datasets/
     │   ├── keyword/
     │   ├── academic/
     │   ├── complex/
+    │   ├── semantic/
+    │   ├── basic/
     │   └── mixed/
     ├── merged/
     │   ├── general/

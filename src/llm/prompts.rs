@@ -147,26 +147,72 @@ Output ONLY the query, nothing else."#,
 /// Prompt for semantic query generation (tests embedding-based retrieval)
 pub fn semantic_query_prompt(document_text: &str) -> String {
     format!(
-        r#"You generate SEMANTIC search queries that test embedding-based retrieval.
+        r#"You generate document-finding queries that test SEMANTIC retrieval over lexical matching.
 
 Document:
 """
 {}
 """
 
-Generate a query that captures the document's meaning WITHOUT using the same keywords:
-- Use SYNONYMS instead of exact terms (cats -> felines/kittens, car -> automobile/vehicle)
-- PARAPHRASE concepts - do not copy phrases from the document
-- Focus on MEANING, not specific words
-- A BM25/keyword search should FAIL to match this query
-- An embedding search should SUCCEED
+Generate a query someone would use to FIND this document, but with ZERO lexical overlap:
+- This is a DOCUMENT SEARCH, not a question - you're looking for this document to exist
+- Use BROADER CATEGORIES, SYNONYMS, or CONCEPTUAL descriptions
+- A BM25/TF-IDF/keyword search MUST FAIL (no shared words or stems)
+- Only an embedding-based search should find this document
 
-Examples of semantic rewording:
-- Doc about "cooking pasta" -> Query: "preparing Italian noodles"
-- Doc about "fixing leaky faucet" -> Query: "repairing dripping tap"
-- Doc about "machine learning models" -> Query: "training AI systems"
+CRITICAL RULES:
+- Read the FULL document content above, not just any title
+- NO words from the document (not even morphological variants like run/running)
+- NO proper nouns, names, or specific terms from the document
+- Think: "What category or concept does this document's CONTENT fall under?"
+- Think: "What would someone search if they vaguely remembered what this was about?"
 
-The query MUST be relevant but use DIFFERENT vocabulary.
+Examples (showing how content maps to queries):
+- Doc about emperor penguins, their habitat, breeding -> Query: "bird books" or "antarctic wildlife"
+- Doc explaining car maintenance steps for a sedan -> Query: "vehicle upkeep guide"
+- Doc with French pastry recipes and techniques -> Query: "European dessert baking methods"
+- Doc discussing Byzantine church construction -> Query: "eastern roman building styles"
+- Doc teaching pandas, numpy, data analysis -> Query: "programming analytics manual"
+- Doc about fixing air conditioning and heating -> Query: "residential climate control repair"
+
+The query should be 2-6 words, like a library catalog search based on the document's content.
+
+Output ONLY the query, nothing else."#,
+        document_text
+    )
+}
+
+/// Prompt for basic query generation (partial keyword matching)
+pub fn basic_query_prompt(document_text: &str) -> String {
+    format!(
+        r#"You generate document-finding queries with PARTIAL keyword matching.
+
+Document:
+"""
+{}
+"""
+
+Generate a query someone would use to FIND this document, with SOME but NOT ALL keywords matching:
+- This is a DOCUMENT SEARCH - you're looking for this document
+- Include 1-2 words that appear in the document
+- OMIT other key identifying words to make it a partial match
+- BM25/lexical search should find this, but not as the top result
+- Query should be incomplete or abbreviated
+
+RULES:
+- Read the FULL document content above
+- Pick the most descriptive 2-4 words, dropping some key terms
+- Keep it like a quick, lazy search someone might type
+
+Examples (showing partial keyword retention):
+- Doc: "Encyclopedia of Emperor Penguins" -> Query: "penguin book" (dropped "emperor", "encyclopedia")
+- Doc: "Toyota Camry 2019 Owner's Manual" -> Query: "camry manual" (dropped "toyota", "2019", "owner")
+- Doc: "Introduction to Machine Learning with Python" -> Query: "machine learning python" (dropped "introduction")
+- Doc: "The Complete Guide to Mediterranean Cooking" -> Query: "mediterranean recipes" (dropped "complete", "guide", changed "cooking")
+- Doc: "Advanced Cardiovascular Life Support Manual" -> Query: "cardiac life support" (dropped "advanced", changed "cardiovascular")
+- Doc about fixing iPhone battery issues -> Query: "iphone battery" (partial match)
+
+The query should be 2-4 words with partial overlap.
 
 Output ONLY the query, nothing else."#,
         document_text
@@ -297,6 +343,7 @@ mod tests {
         assert!(!academic_query_prompt("test doc").is_empty());
         assert!(!complex_query_prompt("test doc").is_empty());
         assert!(!semantic_query_prompt("test doc").is_empty());
+        assert!(!basic_query_prompt("test doc").is_empty());
         assert!(!relevance_scoring_prompt("query", "doc").is_empty());
         assert!(!hard_negative_validation_prompt("query", "doc").is_empty());
         assert!(!topic_generation_prompt().is_empty());
