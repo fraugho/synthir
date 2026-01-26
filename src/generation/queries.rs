@@ -8,7 +8,7 @@ use crate::output::{append_query, BeirDocument, BeirQuery};
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
-use rand::seq::SliceRandom;
+use rand::prelude::{IndexedRandom, SliceRandom};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -111,7 +111,7 @@ impl<'a> QueryGenerator<'a> {
                 .progress_chars("#>-"),
         );
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut doc_indices: Vec<usize> = (0..documents.len()).collect();
 
         // Collect pending queries
@@ -210,7 +210,7 @@ impl<'a> QueryGenerator<'a> {
                 .progress_chars("#>-"),
         );
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let query_types = QueryType::all_types();
 
         for i in 0..total_queries {

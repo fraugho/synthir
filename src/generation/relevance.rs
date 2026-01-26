@@ -169,7 +169,7 @@ impl<'a> RelevanceScorer<'a> {
             .collect();
 
         let mut qrels = Vec::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         let total = queries.len() * sample_size.min(documents.len());
         let pb = ProgressBar::new(total as u64);
@@ -182,7 +182,7 @@ impl<'a> RelevanceScorer<'a> {
 
         for query in queries {
             // Sample random documents
-            use rand::seq::SliceRandom;
+            use rand::prelude::SliceRandom;
             let mut sampled_docs: Vec<&BeirDocument> = documents.iter().collect();
             sampled_docs.shuffle(&mut rng);
             sampled_docs.truncate(sample_size);

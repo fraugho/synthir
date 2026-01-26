@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use async_openai::{
     config::OpenAIConfig,
-    types::{
-        ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
-        ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs,
+    types::chat::{
+        ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
+        ChatCompletionRequestSystemMessageContent, ChatCompletionRequestUserMessage,
+        ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
     },
     Client,
 };
@@ -102,26 +103,27 @@ impl LLMProvider {
         let mut messages: Vec<ChatCompletionRequestMessage> = Vec::new();
 
         if let Some(sys) = system_prompt {
-            messages.push(
-                ChatCompletionRequestSystemMessageArgs::default()
-                    .content(sys)
-                    .build()?
-                    .into(),
-            );
+            messages.push(ChatCompletionRequestMessage::System(
+                ChatCompletionRequestSystemMessage {
+                    content: ChatCompletionRequestSystemMessageContent::Text(sys.to_string()),
+                    name: None,
+                },
+            ));
         }
 
-        messages.push(
-            ChatCompletionRequestUserMessageArgs::default()
-                .content(user_prompt)
-                .build()?
-                .into(),
-        );
+        messages.push(ChatCompletionRequestMessage::User(
+            ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Text(user_prompt.to_string()),
+                name: None,
+            },
+        ));
 
-        let request = CreateChatCompletionRequestArgs::default()
-            .model(&self.model)
-            .messages(messages)
-            .temperature(0.7)
-            .build()?;
+        let request = CreateChatCompletionRequest {
+            model: self.model.clone(),
+            messages,
+            temperature: Some(0.7),
+            ..Default::default()
+        };
 
         let response = self
             .client
