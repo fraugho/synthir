@@ -928,7 +928,15 @@ async fn run_generation(
         // Check if we're in semantic-only mode
         let is_semantic_only = types_to_generate.iter().all(|qt| *qt == QueryType::Semantic);
 
-        let qrels = match config.scoring_mode {
+        // For semantic queries, use exhaustive scoring (BM25 pooling doesn't work for zero-overlap queries)
+        let effective_scoring_mode = if is_semantic_only && config.scoring_mode == ScoringMode::Pooled {
+            info!("Semantic queries detected: using exhaustive scoring instead of pooled (BM25 won't find zero-overlap docs)");
+            ScoringMode::Exhaustive
+        } else {
+            config.scoring_mode.clone()
+        };
+
+        let qrels = match effective_scoring_mode {
             ScoringMode::Source => {
                 scorer
                     .score_source_pairs_concurrent(&all_query_doc_pairs, &documents, config.concurrency)
@@ -937,7 +945,6 @@ async fn run_generation(
             ScoringMode::Pooled => {
                 // Collect all queries for pooled scoring
                 let all_queries: Vec<_> = all_query_doc_pairs.iter().map(|(q, _)| q.clone()).collect();
-                // For semantic queries, filter out candidates with word overlap
                 scorer
                     .score_pooled_with_options(&all_queries, &documents, config.pool_size, config.concurrency, is_semantic_only)
                     .await?
@@ -945,9 +952,15 @@ async fn run_generation(
             ScoringMode::Exhaustive => {
                 // Score every query against every document
                 let all_queries: Vec<_> = all_query_doc_pairs.iter().map(|(q, _)| q.clone()).collect();
-                scorer
+                let qrels = scorer
                     .score_exhaustive(&all_queries, &documents, config.concurrency)
-                    .await?
+                    .await?;
+                // For semantic mode, filter out qrels where query has word overlap with doc
+                if is_semantic_only {
+                    filter_semantic_qrels(qrels, &all_queries, &documents)
+                } else {
+                    qrels
+                }
             }
         };
 
@@ -1123,6 +1136,86 @@ fn chrono_lite_timestamp() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     format!("{}", duration.as_secs())
+}
+
+/// Minimum word length for overlap checking
+const MIN_OVERLAP_WORD_LENGTH: usize = 3;
+
+/// Check if query has word overlap with document text
+fn has_word_overlap(query: &str, document: &str) -> bool {
+    use std::collections::HashSet;
+
+    // Normalize and tokenize document
+    let doc_words: HashSet<String> = document
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= MIN_OVERLAP_WORD_LENGTH)
+        .map(|w| w.to_string())
+        .collect();
+
+    // Tokenize query
+    let query_lower = query.to_lowercase();
+    let query_words: Vec<String> = query_lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= MIN_OVERLAP_WORD_LENGTH)
+        .map(|w| w.to_string())
+        .collect();
+
+    for word in &query_words {
+        // Check exact match
+        if doc_words.contains(word) {
+            return true;
+        }
+        // Check stem overlap (first 4-6 chars)
+        let word_chars: Vec<char> = word.chars().collect();
+        if word_chars.len() >= 4 {
+            for doc_word in &doc_words {
+                let doc_chars: Vec<char> = doc_word.chars().collect();
+                if doc_chars.len() >= 4 {
+                    let min_len = word_chars.len().min(doc_chars.len()).min(6);
+                    let word_prefix: String = word_chars[..min_len].iter().collect();
+                    let doc_prefix: String = doc_chars[..min_len].iter().collect();
+                    if word_prefix == doc_prefix {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Filter qrels to only include pairs with zero word overlap (for semantic queries)
+fn filter_semantic_qrels(
+    qrels: Vec<synthir::output::Qrel>,
+    queries: &[BeirQuery],
+    documents: &[synthir::output::BeirDocument],
+) -> Vec<synthir::output::Qrel> {
+    use std::collections::HashMap;
+
+    let query_map: HashMap<&str, &BeirQuery> = queries.iter().map(|q| (q.id.as_str(), q)).collect();
+    let doc_map: HashMap<&str, &synthir::output::BeirDocument> = documents.iter().map(|d| (d.id.as_str(), d)).collect();
+
+    let before_count = qrels.len();
+    let filtered: Vec<_> = qrels
+        .into_iter()
+        .filter(|qrel| {
+            if let (Some(query), Some(doc)) = (query_map.get(qrel.query_id.as_str()), doc_map.get(qrel.doc_id.as_str())) {
+                let full_doc_text = format!("{} {}", doc.title, doc.text);
+                !has_word_overlap(&query.text, &full_doc_text)
+            } else {
+                false
+            }
+        })
+        .collect();
+
+    let filtered_count = before_count - filtered.len();
+    if filtered_count > 0 {
+        info!("Filtered {} qrels with word overlap (semantic mode), {} remaining", filtered_count, filtered.len());
+    }
+
+    filtered
 }
 
 /// Remix an existing dataset with new queries
@@ -1445,22 +1538,35 @@ async fn run_remix(
         // Check if we're in semantic mode (all query types are semantic)
         let is_semantic_only = query_types.iter().all(|qt| *qt == QueryType::Semantic);
 
-        let all_qrels = match scoring_mode {
+        // For semantic queries, use exhaustive scoring (BM25 pooling doesn't work for zero-overlap queries)
+        let effective_scoring_mode = if is_semantic_only && scoring_mode == ScoringMode::Pooled {
+            info!("Semantic queries detected: using exhaustive scoring instead of pooled (BM25 won't find zero-overlap docs)");
+            ScoringMode::Exhaustive
+        } else {
+            scoring_mode.clone()
+        };
+
+        let all_qrels = match effective_scoring_mode {
             ScoringMode::Source => {
                 scorer
                     .score_source_pairs_concurrent(&all_query_doc_pairs, &documents, concurrency)
                     .await?
             }
             ScoringMode::Pooled => {
-                // For semantic queries, filter out candidates with word overlap
                 scorer
                     .score_pooled_with_options(&all_queries, &documents, pool_size, concurrency, is_semantic_only)
                     .await?
             }
             ScoringMode::Exhaustive => {
-                scorer
+                let qrels = scorer
                     .score_exhaustive(&all_queries, &documents, concurrency)
-                    .await?
+                    .await?;
+                // For semantic mode, filter out qrels where query has word overlap with doc
+                if is_semantic_only {
+                    filter_semantic_qrels(qrels, &all_queries, &documents)
+                } else {
+                    qrels
+                }
             }
         };
 
