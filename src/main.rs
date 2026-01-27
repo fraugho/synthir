@@ -257,9 +257,17 @@ enum Commands {
         #[arg(long, default_value = "https://api.openai.com/v1")]
         base_url: String,
 
+        /// Embedding API base URL (for semantic pooling). Defaults to base_url if not specified.
+        #[arg(long)]
+        embedding_url: Option<String>,
+
         /// Model identifier
         #[arg(short, long, default_value = "gpt-4")]
         model: String,
+
+        /// Embedding model identifier (for semantic pooling). Defaults to model if not specified.
+        #[arg(long)]
+        embedding_model: Option<String>,
 
         /// API key (or set OPENAI_API_KEY env var)
         #[arg(long)]
@@ -320,9 +328,17 @@ enum Commands {
         #[arg(long, default_value = "https://api.openai.com/v1")]
         base_url: String,
 
+        /// Embedding API base URL (for semantic pooling). Defaults to base_url if not specified.
+        #[arg(long)]
+        embedding_url: Option<String>,
+
         /// Model identifier
         #[arg(short, long, default_value = "gpt-4")]
         model: String,
+
+        /// Embedding model identifier (for semantic pooling). Defaults to model if not specified.
+        #[arg(long)]
+        embedding_model: Option<String>,
 
         /// API key (or set OPENAI_API_KEY env var)
         #[arg(long)]
@@ -587,7 +603,9 @@ async fn main() -> Result<()> {
             query_types,
             queries_per_type,
             base_url,
+            embedding_url,
             model,
+            embedding_model,
             api_key,
             concurrency,
             scoring_mode,
@@ -630,7 +648,9 @@ async fn main() -> Result<()> {
                 selected_query_types,
                 queries_per_type,
                 base_url,
+                embedding_url,
                 model,
+                embedding_model,
                 api_key,
                 concurrency,
                 scoring,
@@ -653,7 +673,9 @@ async fn main() -> Result<()> {
             query_types,
             queries_per_type,
             base_url,
+            embedding_url,
             model,
+            embedding_model,
             api_key,
             concurrency,
             scoring_mode,
@@ -700,7 +722,9 @@ async fn main() -> Result<()> {
                 selected_query_types,
                 queries_per_type,
                 base_url,
+                embedding_url,
                 model,
+                embedding_model,
                 api_key,
                 concurrency,
                 scoring,
@@ -1228,7 +1252,9 @@ async fn run_remix(
     query_types: Vec<QueryType>,
     queries_per_type: Option<usize>,
     base_url: String,
+    embedding_url: Option<String>,
     model: String,
+    embedding_model: Option<String>,
     api_key: String,
     concurrency: usize,
     scoring_mode: ScoringMode,
@@ -1276,8 +1302,9 @@ async fn run_remix(
         base_dir.join(name)
     };
 
-    // Save base_url for embedding client (before moving into provider config)
-    let embedding_base_url = base_url.clone();
+    // Resolve embedding URL and model (use separate endpoint if provided, otherwise same as LLM)
+    let embedding_base_url = embedding_url.unwrap_or_else(|| base_url.clone());
+    let embedding_model_name = embedding_model.unwrap_or_else(|| model.clone());
 
     // Create LLM provider once (shared across all locales)
     let provider = LLMProvider::new(LLMProviderConfig {
@@ -1552,7 +1579,7 @@ async fn run_remix(
                 if is_semantic_only {
                     // Use embedding-based pooling for semantic queries
                     info!("Semantic queries detected: using embedding-based pooling (HNSW)");
-                    let embedding_client = EmbeddingClient::new(&embedding_base_url, &model);
+                    let embedding_client = EmbeddingClient::new(&embedding_base_url, &embedding_model_name);
                     scorer
                         .score_pooled_semantic(&all_queries, &documents, &embedding_client, pool_size, concurrency)
                         .await?
@@ -1690,7 +1717,9 @@ async fn run_remix_batch(
     query_types: Vec<QueryType>,
     queries_per_type: Option<usize>,
     base_url: String,
+    embedding_url: Option<String>,
     model: String,
+    embedding_model: Option<String>,
     api_key: String,
     concurrency: usize,
     scoring_mode: ScoringMode,
@@ -1727,6 +1756,13 @@ async fn run_remix_batch(
             .join("-")
     };
 
+    // Auto-switch to grouped mode if --output is specified
+    let output_mode = if output_dir.is_some() {
+        OutputMode::Grouped
+    } else {
+        output_mode
+    };
+
     // Determine output base directory for grouped mode
     let grouped_output_dir = output_dir.unwrap_or_else(|| {
         let name = source_dir
@@ -1739,12 +1775,26 @@ async fn run_remix_batch(
             .join(format!("{}-{}", name, type_suffix))
     });
 
+    // Filter out datasets that already have the query type suffix (avoid -semantic-semantic chains)
+    let suffix_pattern = format!("-{}", type_suffix);
+    let filtered_datasets: Vec<_> = discovery.datasets.iter()
+        .filter(|d| {
+            let name = d.root_dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            !name.ends_with(&suffix_pattern)
+        })
+        .collect();
+
+    let skipped_suffix_count = discovery.datasets.len() - filtered_datasets.len();
+    if skipped_suffix_count > 0 {
+        info!("Skipped {} datasets already ending with '-{}'", skipped_suffix_count, type_suffix);
+    }
+
     let mut succeeded = 0;
     let mut failed = 0;
     let mut skipped = 0;
-    let total = discovery.datasets.len();
+    let total = filtered_datasets.len();
 
-    for (idx, dataset_info) in discovery.datasets.iter().enumerate() {
+    for (idx, dataset_info) in filtered_datasets.iter().enumerate() {
         let dataset_name = dataset_info
             .root_dir
             .file_name()
@@ -1812,7 +1862,9 @@ async fn run_remix_batch(
             query_types.clone(),
             queries_per_type,
             base_url.clone(),
+            embedding_url.clone(),
             model.clone(),
+            embedding_model.clone(),
             api_key.clone(),
             concurrency,
             scoring_mode,
