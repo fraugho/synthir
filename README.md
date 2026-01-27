@@ -146,6 +146,75 @@ All file readers handle different line endings automatically:
 
 This ensures datasets created on any platform can be read correctly.
 
+### `remix-batch` - Batch Remix Multiple Datasets
+
+Remix all compatible datasets in a directory with the same configuration.
+
+```bash
+synthir remix-batch [OPTIONS] --source <DIRECTORY>
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-s, --source` | Directory containing multiple datasets | required |
+| `--output-mode` | `sibling` (next to originals) or `grouped` (separate dir) | sibling |
+| `-o, --output` | Output directory for grouped mode | `<source>-<query-type>` |
+| `--on-exist` | Behavior for existing output: `skip`, `overwrite`, or `ask` | skip |
+| `--query-types` | Query types to generate | semantic |
+| `-q, --queries-per-type` | Number of queries (or auto from source) | - |
+| `-j, --concurrency` | Concurrent LLM requests | 1 |
+| `--scoring-mode` | Scoring mode: `source`, `pooled`, or `exhaustive` | source |
+| `--pool-size` | Pool size for pooled scoring | 30 |
+| `--dry-run` | Preview what would happen | false |
+
+**Output Naming:** `{original-name}-{query-type}` (e.g., `WindowsAppSearch-semantic`)
+
+**Examples:**
+
+```bash
+# Remix all datasets in EvalsDatasets with semantic queries (output next to originals)
+synthir remix-batch --source ./EvalsDatasets --query-types semantic \
+  --base-url http://localhost:8080/v1 --model local -j 32 --api-key none
+
+# Put remixed datasets in a separate directory (default: EvalsDatasets-semantic)
+synthir remix-batch --source ./EvalsDatasets --output-mode grouped \
+  --query-types semantic --api-key YOUR_KEY
+
+# Specify custom output directory
+synthir remix-batch --source ./EvalsDatasets --output-mode grouped \
+  --output ./my-remixed-datasets --query-types semantic --api-key YOUR_KEY
+
+# Skip datasets that already have output
+synthir remix-batch --source ./EvalsDatasets --on-exist skip --api-key YOUR_KEY
+
+# Overwrite existing outputs
+synthir remix-batch --source ./EvalsDatasets --on-exist overwrite --api-key YOUR_KEY
+
+# Preview what would be processed
+synthir remix-batch --source ./EvalsDatasets --dry-run
+```
+
+**Output Modes:**
+
+*Sibling Mode (default):* New datasets placed next to originals
+```
+EvalsDatasets/
+├── WindowsAppSearch/           # original
+├── WindowsAppSearch-semantic/  # new
+├── GoodNotesOCR/               # original
+└── GoodNotesOCR-semantic/      # new
+```
+
+*Grouped Mode:* New datasets in separate directory
+```
+EvalsDatasets/           # originals untouched
+EvalsDatasets-semantic/  # auto-named from query type (or custom --output)
+├── WindowsAppSearch-semantic/
+└── GoodNotesOCR-semantic/
+```
+
+The command automatically skips incompatible directories (no corpus/label files) and continues processing remaining datasets.
+
 ### `queries` - Generate Queries for Existing Corpus
 
 ```bash

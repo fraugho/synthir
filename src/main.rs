@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use synthir::{
     benchmark::{run_benchmark, BenchmarkConfig},
     checkpoint::{CheckpointManager, GenerationPhase, ProgressState},
-    config::{parse_query_types, GenerationConfig, QueryType, RuntimeOptions, ScoreScale, ScoringMode},
+    config::{parse_query_types, GenerationConfig, OnExist, OutputMode, QueryType, RuntimeOptions, ScoreScale, ScoringMode},
     generation::{DocumentGenerator, QueryGenerator, RelevanceScorer},
     llm::{topic_generation_prompt, LLMProvider, LLMProviderConfig, MultiEndpointProvider},
     meta::{run_meta_generation, MetaConfig},
@@ -12,7 +12,7 @@ use synthir::{
     output::{
         read_corpus, write_qrels, write_queries, BeirQuery, DatasetMetadata, OutputOrganizer,
         QueryCounts, detect_dataset, read_corpus_auto, analyze_qrels_splits, DatasetFormat,
-        write_ocr_queries, Qrel,
+        write_ocr_queries, Qrel, discover_datasets,
     },
     topics::{create_custom_topic, get_builtin_topics, get_topic, TopicConfig},
     utils::{display_dry_run_info, display_topics, display_verbose_start},
@@ -250,6 +250,65 @@ enum Commands {
         query_types: String,
 
         /// Number of queries per split (if source has train/dev/test, preserves ratio)
+        #[arg(short = 'q', long)]
+        queries_per_type: Option<usize>,
+
+        /// LLM API base URL
+        #[arg(long, default_value = "https://api.openai.com/v1")]
+        base_url: String,
+
+        /// Model identifier
+        #[arg(short, long, default_value = "gpt-4")]
+        model: String,
+
+        /// API key (or set OPENAI_API_KEY env var)
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Number of concurrent LLM requests
+        #[arg(short = 'j', long, default_value = "1")]
+        concurrency: usize,
+
+        /// Scoring mode: source (1-to-1), pooled (BM25 candidates), exhaustive (all pairs)
+        #[arg(long, default_value = "source")]
+        scoring_mode: String,
+
+        /// Pool size for pooled scoring (top-k docs per query)
+        #[arg(long, default_value = "30")]
+        pool_size: usize,
+
+        /// Verbose output
+        #[arg(short, long)]
+        verbose: bool,
+
+        /// Dry run - show what would happen without LLM calls
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Batch remix all compatible datasets in a directory
+    RemixBatch {
+        /// Directory containing multiple datasets to remix
+        #[arg(short, long)]
+        source: PathBuf,
+
+        /// Output mode: sibling (next to originals) or grouped (in separate directory)
+        #[arg(long, default_value = "sibling")]
+        output_mode: String,
+
+        /// Output directory for grouped mode (defaults to <source>-remixed)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Behavior when output already exists: skip, overwrite, or ask
+        #[arg(long, default_value = "skip")]
+        on_exist: String,
+
+        /// Query types to generate (comma-separated: natural,keyword,academic,complex,semantic,basic,mixed)
+        #[arg(long, value_name = "TYPES", default_value = "semantic")]
+        query_types: String,
+
+        /// Number of queries per type (auto-derived from source if not specified)
         #[arg(short = 'q', long)]
         queries_per_type: Option<usize>,
 
@@ -574,6 +633,70 @@ async fn main() -> Result<()> {
             if !dry_run {
                 info!("Dataset remix complete!");
             }
+        }
+
+        Commands::RemixBatch {
+            source,
+            output_mode,
+            output,
+            on_exist,
+            query_types,
+            queries_per_type,
+            base_url,
+            model,
+            api_key,
+            concurrency,
+            scoring_mode,
+            pool_size,
+            verbose,
+            dry_run,
+        } => {
+            let level = if verbose { Level::DEBUG } else { Level::INFO };
+            let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
+            tracing::subscriber::set_global_default(subscriber)?;
+
+            // API key only required for non-dry-run
+            let api_key = if dry_run {
+                api_key
+                    .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+                    .unwrap_or_default()
+            } else {
+                api_key
+                    .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+                    .context("API key required: use --api-key or set OPENAI_API_KEY")?
+            };
+
+            let selected_query_types = parse_query_types(&query_types)
+                .map_err(|e| anyhow::anyhow!("Invalid query types: {}", e))?;
+
+            let scoring: ScoringMode = scoring_mode
+                .parse()
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            let output_mode: OutputMode = output_mode
+                .parse()
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            let on_exist: OnExist = on_exist
+                .parse()
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            run_remix_batch(
+                source,
+                output_mode,
+                output,
+                on_exist,
+                selected_query_types,
+                queries_per_type,
+                base_url,
+                model,
+                api_key,
+                concurrency,
+                scoring,
+                pool_size,
+                dry_run,
+            )
+            .await?;
         }
     }
 
@@ -1291,6 +1414,169 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         } else {
             std::fs::copy(&src_path, &dst_path)?;
         }
+    }
+
+    Ok(())
+}
+
+/// Batch remix all compatible datasets in a directory
+async fn run_remix_batch(
+    source_dir: PathBuf,
+    output_mode: OutputMode,
+    output_dir: Option<PathBuf>,
+    on_exist: OnExist,
+    query_types: Vec<QueryType>,
+    queries_per_type: Option<usize>,
+    base_url: String,
+    model: String,
+    api_key: String,
+    concurrency: usize,
+    scoring_mode: ScoringMode,
+    pool_size: usize,
+    dry_run: bool,
+) -> Result<()> {
+    info!("Discovering datasets in {}...", source_dir.display());
+
+    let discovery = discover_datasets(&source_dir)?;
+
+    if discovery.datasets.is_empty() {
+        info!("No compatible datasets found");
+        if !discovery.skipped.is_empty() {
+            info!("Skipped {} incompatible directories", discovery.skipped.len());
+        }
+        return Ok(());
+    }
+
+    info!(
+        "Found {} compatible datasets, {} skipped",
+        discovery.datasets.len(),
+        discovery.skipped.len()
+    );
+
+    // Build suffix from query types
+    let type_suffix = if query_types.len() == 1 {
+        query_types[0].as_str().to_string()
+    } else {
+        query_types
+            .iter()
+            .map(|t| t.as_str())
+            .collect::<Vec<_>>()
+            .join("-")
+    };
+
+    // Determine output base directory for grouped mode
+    let grouped_output_dir = output_dir.unwrap_or_else(|| {
+        let name = source_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("datasets");
+        source_dir
+            .parent()
+            .unwrap_or(&source_dir)
+            .join(format!("{}-{}", name, type_suffix))
+    });
+
+    let mut succeeded = 0;
+    let mut failed = 0;
+    let mut skipped = 0;
+    let total = discovery.datasets.len();
+
+    for (idx, dataset_info) in discovery.datasets.iter().enumerate() {
+        let dataset_name = dataset_info
+            .root_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
+
+        let output_name = format!("{}-{}", dataset_name, type_suffix);
+
+        // Determine output path based on mode
+        let output_path = match output_mode {
+            OutputMode::Sibling => source_dir.join(&output_name),
+            OutputMode::Grouped => grouped_output_dir.join(&output_name),
+        };
+
+        info!(
+            "\n[{}/{}] {} → {}",
+            idx + 1,
+            total,
+            dataset_name,
+            output_name
+        );
+
+        // Check if output already exists
+        if output_path.exists() {
+            match on_exist {
+                OnExist::Skip => {
+                    info!("  Skipping: output already exists");
+                    skipped += 1;
+                    continue;
+                }
+                OnExist::Overwrite => {
+                    info!("  Removing existing output...");
+                    if !dry_run {
+                        std::fs::remove_dir_all(&output_path)?;
+                    }
+                }
+                OnExist::Ask => {
+                    // For now, treat ask as skip in non-interactive mode
+                    // TODO: Add interactive prompt support
+                    info!("  Skipping: output already exists (use --on-exist overwrite to replace)");
+                    skipped += 1;
+                    continue;
+                }
+            }
+        }
+
+        if dry_run {
+            info!("  [DRY RUN] Would create: {}", output_path.display());
+            succeeded += 1;
+            continue;
+        }
+
+        // Compute output directory (parent of the dataset)
+        let parent_output = match output_mode {
+            OutputMode::Sibling => Some(source_dir.clone()),
+            OutputMode::Grouped => Some(grouped_output_dir.clone()),
+        };
+
+        // Run remix for this dataset
+        match run_remix(
+            dataset_info.root_dir.clone(),
+            Some(output_name.clone()),
+            parent_output,
+            false, // not in-place
+            query_types.clone(),
+            queries_per_type,
+            base_url.clone(),
+            model.clone(),
+            api_key.clone(),
+            concurrency,
+            scoring_mode,
+            pool_size,
+            dry_run,
+        )
+        .await
+        {
+            Ok(_) => {
+                succeeded += 1;
+            }
+            Err(e) => {
+                info!("  Failed: {}", e);
+                failed += 1;
+            }
+        }
+    }
+
+    // Print summary
+    info!("\n========================================");
+    info!(
+        "Batch remix complete: {} succeeded, {} failed, {} skipped",
+        succeeded, failed, skipped
+    );
+
+    if failed > 0 {
+        anyhow::bail!("{} dataset(s) failed to remix", failed);
     }
 
     Ok(())

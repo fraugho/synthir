@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use tracing::{info, warn};
 
 use super::{BeirDocument, BeirQuery, Qrel};
 
@@ -304,6 +305,67 @@ pub fn analyze_qrels_splits(info: &DatasetInfo) -> Result<Vec<QrelsSplit>> {
     }
 
     Ok(splits)
+}
+
+/// Result of dataset discovery
+#[derive(Debug)]
+pub struct DiscoveryResult {
+    pub datasets: Vec<DatasetInfo>,
+    pub skipped: Vec<(PathBuf, String)>, // (path, reason)
+}
+
+/// Discover all compatible datasets in a directory
+/// Checks immediate subdirectories for BEIR or OCR format datasets
+pub fn discover_datasets(dir: &Path) -> Result<DiscoveryResult> {
+    if !dir.is_dir() {
+        anyhow::bail!("Source path must be a directory: {}", dir.display());
+    }
+
+    let mut datasets = Vec::new();
+    let mut skipped = Vec::new();
+
+    let entries = fs::read_dir(dir)
+        .with_context(|| format!("Failed to read directory: {}", dir.display()))?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+
+        // Skip non-directories
+        if !path.is_dir() {
+            continue;
+        }
+
+        // Skip hidden directories
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if name.starts_with('.') {
+                continue;
+            }
+        }
+
+        // Try to detect dataset format
+        match detect_dataset(&path) {
+            Ok(info) => {
+                let name = path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown");
+                info!("  Found: {} ({})", name, info.format);
+                datasets.push(info);
+            }
+            Err(e) => {
+                let name = path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown");
+                let reason = format!("{}", e);
+                warn!("  Skipped: {} ({})", name, reason);
+                skipped.push((path, reason));
+            }
+        }
+    }
+
+    // Sort datasets by name for deterministic ordering
+    datasets.sort_by(|a, b| a.root_dir.cmp(&b.root_dir));
+
+    Ok(DiscoveryResult { datasets, skipped })
 }
 
 #[cfg(test)]

@@ -72,6 +72,72 @@ impl std::str::FromStr for ScoringMode {
     }
 }
 
+/// Output mode for batch remix
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputMode {
+    /// Create output datasets as siblings to originals (in same directory)
+    #[default]
+    Sibling,
+    /// Create output datasets in a separate grouped directory
+    Grouped,
+}
+
+impl std::fmt::Display for OutputMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OutputMode::Sibling => write!(f, "sibling"),
+            OutputMode::Grouped => write!(f, "grouped"),
+        }
+    }
+}
+
+impl std::str::FromStr for OutputMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "sibling" => Ok(OutputMode::Sibling),
+            "grouped" => Ok(OutputMode::Grouped),
+            _ => Err(format!("Invalid output mode: {}. Use 'sibling' or 'grouped'", s)),
+        }
+    }
+}
+
+/// Behavior when output already exists
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OnExist {
+    /// Skip datasets that already have output
+    #[default]
+    Skip,
+    /// Overwrite existing output
+    Overwrite,
+    /// Ask user for each existing output
+    Ask,
+}
+
+impl std::fmt::Display for OnExist {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OnExist::Skip => write!(f, "skip"),
+            OnExist::Overwrite => write!(f, "overwrite"),
+            OnExist::Ask => write!(f, "ask"),
+        }
+    }
+}
+
+impl std::str::FromStr for OnExist {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "skip" => Ok(OnExist::Skip),
+            "overwrite" => Ok(OnExist::Overwrite),
+            "ask" => Ok(OnExist::Ask),
+            _ => Err(format!("Invalid on-exist mode: {}. Use 'skip', 'overwrite', or 'ask'", s)),
+        }
+    }
+}
+
 /// Query types supported by the generator
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
