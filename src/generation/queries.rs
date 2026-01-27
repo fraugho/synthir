@@ -28,32 +28,40 @@ fn check_word_overlap(query: &str, document: &str) -> Vec<String> {
     let doc_words: HashSet<String> = document
         .to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.len() >= MIN_WORD_LENGTH)
+        .filter(|w| w.chars().count() >= MIN_WORD_LENGTH)
         .map(|w| w.to_string())
         .collect();
 
     // Tokenize query and check against document
     let query_lower = query.to_lowercase();
-    let query_words: Vec<&str> = query_lower
+    let query_words: Vec<String> = query_lower
         .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.len() >= MIN_WORD_LENGTH)
+        .filter(|w| w.chars().count() >= MIN_WORD_LENGTH)
+        .map(|w| w.to_string())
         .collect();
 
     let mut overlaps = Vec::new();
-    for word in query_words {
+    for word in &query_words {
         // Check exact match
         if doc_words.contains(word) {
-            overlaps.push(word.to_string());
+            overlaps.push(word.clone());
             continue;
         }
-        // Check stem overlap (simple: check if word is prefix/suffix of any doc word or vice versa)
-        for doc_word in &doc_words {
-            if word.len() >= 4 && doc_word.len() >= 4 {
-                // Check if they share a common stem (first 4+ chars)
-                let min_len = word.len().min(doc_word.len()).min(6);
-                if word[..min_len] == doc_word[..min_len] {
-                    overlaps.push(format!("{}~{}", word, doc_word));
-                    break;
+        // Check stem overlap (simple: check if words share common prefix)
+        // Use char count for proper Unicode handling
+        let word_chars: Vec<char> = word.chars().collect();
+        if word_chars.len() >= 4 {
+            for doc_word in &doc_words {
+                let doc_chars: Vec<char> = doc_word.chars().collect();
+                if doc_chars.len() >= 4 {
+                    // Check if they share a common stem (first 4-6 chars)
+                    let min_len = word_chars.len().min(doc_chars.len()).min(6);
+                    let word_prefix: String = word_chars[..min_len].iter().collect();
+                    let doc_prefix: String = doc_chars[..min_len].iter().collect();
+                    if word_prefix == doc_prefix {
+                        overlaps.push(format!("{}~{}", word, doc_word));
+                        break;
+                    }
                 }
             }
         }
