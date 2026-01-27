@@ -6,7 +6,7 @@ use synthir::{
     checkpoint::{CheckpointManager, GenerationPhase, ProgressState},
     config::{parse_query_types, GenerationConfig, OnExist, OutputMode, QueryType, RuntimeOptions, ScoreScale, ScoringMode},
     generation::{DocumentGenerator, QueryGenerator, RelevanceScorer},
-    llm::{topic_generation_prompt, LLMProvider, LLMProviderConfig, MultiEndpointProvider, LanguageDetector, locale_to_language},
+    llm::{topic_generation_prompt, LLMProvider, LLMProviderConfig, MultiEndpointProvider, LanguageDetector, locale_to_language, EmbeddingClient},
     meta::{run_meta_generation, MetaConfig},
     mining::HardNegativeMiner,
     output::{
@@ -928,15 +928,7 @@ async fn run_generation(
         // Check if we're in semantic-only mode
         let is_semantic_only = types_to_generate.iter().all(|qt| *qt == QueryType::Semantic);
 
-        // For semantic queries, use exhaustive scoring (BM25 pooling doesn't work for zero-overlap queries)
-        let effective_scoring_mode = if is_semantic_only && config.scoring_mode == ScoringMode::Pooled {
-            info!("Semantic queries detected: using exhaustive scoring instead of pooled (BM25 won't find zero-overlap docs)");
-            ScoringMode::Exhaustive
-        } else {
-            config.scoring_mode.clone()
-        };
-
-        let qrels = match effective_scoring_mode {
+        let qrels = match &config.scoring_mode {
             ScoringMode::Source => {
                 scorer
                     .score_source_pairs_concurrent(&all_query_doc_pairs, &documents, config.concurrency)
@@ -945,9 +937,18 @@ async fn run_generation(
             ScoringMode::Pooled => {
                 // Collect all queries for pooled scoring
                 let all_queries: Vec<_> = all_query_doc_pairs.iter().map(|(q, _)| q.clone()).collect();
-                scorer
-                    .score_pooled_with_options(&all_queries, &documents, config.pool_size, config.concurrency, is_semantic_only)
-                    .await?
+                if is_semantic_only {
+                    // Use embedding-based pooling for semantic queries
+                    info!("Semantic queries detected: using embedding-based pooling (HNSW)");
+                    let embedding_client = EmbeddingClient::new(&config.base_url, &config.model);
+                    scorer
+                        .score_pooled_semantic(&all_queries, &documents, &embedding_client, config.pool_size, config.concurrency)
+                        .await?
+                } else {
+                    scorer
+                        .score_pooled_with_options(&all_queries, &documents, config.pool_size, config.concurrency, false)
+                        .await?
+                }
             }
             ScoringMode::Exhaustive => {
                 // Score every query against every document
@@ -1275,6 +1276,9 @@ async fn run_remix(
         base_dir.join(name)
     };
 
+    // Save base_url for embedding client (before moving into provider config)
+    let embedding_base_url = base_url.clone();
+
     // Create LLM provider once (shared across all locales)
     let provider = LLMProvider::new(LLMProviderConfig {
         base_url,
@@ -1538,24 +1542,25 @@ async fn run_remix(
         // Check if we're in semantic mode (all query types are semantic)
         let is_semantic_only = query_types.iter().all(|qt| *qt == QueryType::Semantic);
 
-        // For semantic queries, use exhaustive scoring (BM25 pooling doesn't work for zero-overlap queries)
-        let effective_scoring_mode = if is_semantic_only && scoring_mode == ScoringMode::Pooled {
-            info!("Semantic queries detected: using exhaustive scoring instead of pooled (BM25 won't find zero-overlap docs)");
-            ScoringMode::Exhaustive
-        } else {
-            scoring_mode.clone()
-        };
-
-        let all_qrels = match effective_scoring_mode {
+        let all_qrels = match &scoring_mode {
             ScoringMode::Source => {
                 scorer
                     .score_source_pairs_concurrent(&all_query_doc_pairs, &documents, concurrency)
                     .await?
             }
             ScoringMode::Pooled => {
-                scorer
-                    .score_pooled_with_options(&all_queries, &documents, pool_size, concurrency, is_semantic_only)
-                    .await?
+                if is_semantic_only {
+                    // Use embedding-based pooling for semantic queries
+                    info!("Semantic queries detected: using embedding-based pooling (HNSW)");
+                    let embedding_client = EmbeddingClient::new(&embedding_base_url, &model);
+                    scorer
+                        .score_pooled_semantic(&all_queries, &documents, &embedding_client, pool_size, concurrency)
+                        .await?
+                } else {
+                    scorer
+                        .score_pooled_with_options(&all_queries, &documents, pool_size, concurrency, false)
+                        .await?
+                }
             }
             ScoringMode::Exhaustive => {
                 let qrels = scorer

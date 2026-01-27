@@ -1,9 +1,11 @@
 use crate::config::ScoreScale;
-use crate::llm::{fine_grained_relevance_prompt, range_relevance_prompt, relevance_scoring_prompt, LLMProvider};
+use crate::llm::{fine_grained_relevance_prompt, range_relevance_prompt, relevance_scoring_prompt, EmbeddingClient, LLMProvider};
 use crate::output::{BeirDocument, BeirQuery, Qrel};
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
+use hnsw::{Hnsw, Searcher};
 use indicatif::{ProgressBar, ProgressStyle};
+use space::Metric;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tantivy::collector::TopDocs;
@@ -637,6 +639,209 @@ impl<'a> RelevanceScorer<'a> {
         );
 
         Ok(all_qrels)
+    }
+
+    /// Score queries using embedding-based pooling (for semantic queries)
+    /// 1. Embed all documents and build HNSW index
+    /// 2. For each query, embed and find top-K nearest neighbors
+    /// 3. LLM scores those K candidates
+    pub async fn score_pooled_semantic(
+        &self,
+        queries: &[BeirQuery],
+        documents: &[BeirDocument],
+        embedding_client: &EmbeddingClient,
+        pool_size: usize,
+        concurrency: usize,
+    ) -> Result<Vec<Qrel>> {
+        let concurrency = concurrency.max(1);
+
+        // Step 1: Embed all documents
+        info!("Embedding {} documents for vector index...", documents.len());
+        let pb_embed = ProgressBar::new(documents.len() as u64);
+        pb_embed.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} docs embedded ({eta})")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+
+        // Batch embed documents
+        let mut doc_embeddings: Vec<(String, Vec<f32>)> = Vec::new();
+        let batch_size = 32; // Embed in batches
+
+        for chunk in documents.chunks(batch_size) {
+            let texts: Vec<String> = chunk
+                .iter()
+                .map(|d| format!("{} {}", d.title, d.text))
+                .collect();
+
+            let embeddings = embedding_client.embed_batch(&texts).await?;
+
+            for (doc, emb) in chunk.iter().zip(embeddings.into_iter()) {
+                doc_embeddings.push((doc.id.clone(), emb));
+                pb_embed.inc(1);
+            }
+        }
+        pb_embed.finish_with_message("Document embedding complete");
+
+        if doc_embeddings.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Get embedding dimension from first embedding
+        let embed_dim = doc_embeddings[0].1.len();
+        info!("Embedding dimension: {}", embed_dim);
+
+        // Step 2: Build HNSW index
+        info!("Building HNSW vector index...");
+        // M=12, M0=24 are typical HNSW parameters
+        // Use rand_pcg which is compatible with the rand_core version hnsw expects
+        let mut hnsw: Hnsw<CosineMetric, Vec<f32>, rand_pcg::Pcg64, 12, 24> =
+            Hnsw::new(CosineMetric);
+        let mut doc_id_map: Vec<String> = Vec::new();
+
+        for (doc_id, embedding) in &doc_embeddings {
+            hnsw.insert(embedding.clone(), &mut Searcher::default());
+            doc_id_map.push(doc_id.clone());
+        }
+
+        info!("HNSW index built with {} documents", doc_id_map.len());
+
+        // Build doc map for scoring
+        let doc_map: HashMap<&str, &BeirDocument> =
+            documents.iter().map(|d| (d.id.as_str(), d)).collect();
+
+        // Step 3: For each query, embed and find candidates, then score
+        let mut all_qrels = Vec::new();
+
+        let pb = ProgressBar::new(queries.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} queries (semantic pooled) ({eta})")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+
+        for query in queries {
+            // Embed query
+            let query_embedding = embedding_client.embed_one(&query.text).await?;
+
+            // Vector search for top-K candidates
+            let mut searcher = Searcher::default();
+            let mut neighbors = vec![space::Neighbor { index: 0, distance: 0 }; pool_size * 2];
+            let found_count = hnsw.nearest(&query_embedding, pool_size * 2, &mut searcher, &mut neighbors).len();
+            neighbors.truncate(found_count);
+
+            let mut candidates: Vec<String> = neighbors
+                .iter()
+                .map(|n| doc_id_map[n.index].clone())
+                .collect();
+
+            // Filter out candidates with word overlap (should be rare with embeddings)
+            let before_count = candidates.len();
+            candidates.retain(|doc_id| {
+                if let Some(doc) = doc_map.get(doc_id.as_str()) {
+                    let full_text = format!("{} {}", doc.title, doc.text);
+                    !has_word_overlap(&query.text, &full_text)
+                } else {
+                    false
+                }
+            });
+            candidates.truncate(pool_size);
+
+            let filtered = before_count - candidates.len();
+            if filtered > 0 {
+                debug!("Filtered {} candidates with word overlap for query {}", filtered, query.id);
+            }
+
+            if candidates.is_empty() {
+                pb.inc(1);
+                continue;
+            }
+
+            // Score candidates with LLM
+            let semaphore = Arc::new(Semaphore::new(concurrency));
+            let futures: Vec<_> = candidates
+                .iter()
+                .filter_map(|doc_id| doc_map.get(doc_id.as_str()).map(|d| (doc_id.clone(), *d)))
+                .map(|(doc_id, doc)| {
+                    let sem = semaphore.clone();
+                    let q = query.clone();
+                    let d = doc.clone();
+                    async move {
+                        let _permit = sem.acquire().await.unwrap();
+                        let score = self.score_one_fine(&q, &d).await;
+                        (doc_id, score)
+                    }
+                })
+                .collect();
+
+            let results: Vec<_> = stream::iter(futures)
+                .buffer_unordered(concurrency)
+                .collect()
+                .await;
+
+            // Collect and sort scores
+            let mut scored: Vec<(String, u8)> = Vec::new();
+            for (doc_id, result) in results {
+                if let Ok(score) = result {
+                    scored.push((doc_id, score));
+                }
+            }
+            scored.sort_by(|a, b| b.1.cmp(&a.1));
+
+            // Detect cliff and convert to output scores
+            let cliff_idx = Self::detect_cliff(&scored);
+
+            for (i, (doc_id, fine_score)) in scored.iter().enumerate() {
+                let output_score = if i < cliff_idx {
+                    self.fine_to_output(*fine_score)
+                } else {
+                    self.score_min
+                };
+
+                all_qrels.push(Qrel {
+                    query_id: query.id.clone(),
+                    doc_id: doc_id.clone(),
+                    score: output_score,
+                });
+            }
+
+            pb.inc(1);
+        }
+
+        pb.finish_with_message("Semantic pooled scoring complete");
+        info!(
+            "Generated {} relevance judgments using semantic pooled scoring",
+            all_qrels.len()
+        );
+
+        Ok(all_qrels)
+    }
+}
+
+/// Cosine distance metric for embeddings
+struct CosineMetric;
+
+impl Metric<Vec<f32>> for CosineMetric {
+    type Unit = u32;
+
+    fn distance(&self, a: &Vec<f32>, b: &Vec<f32>) -> Self::Unit {
+        // Cosine distance = 1 - cosine_similarity
+        let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+        let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+        let cosine_sim = if norm_a > 0.0 && norm_b > 0.0 {
+            dot / (norm_a * norm_b)
+        } else {
+            0.0
+        };
+
+        // Convert to distance: 0 = identical, u32::MAX = opposite
+        // cosine_sim ranges from -1 to 1, so (1 - cosine_sim) ranges from 0 to 2
+        let distance = (1.0 - cosine_sim) * (u32::MAX as f32 / 2.0);
+        distance as u32
     }
 }
 
