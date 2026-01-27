@@ -925,6 +925,9 @@ async fn run_generation(
             config.score_max,
         );
 
+        // Check if we're in semantic-only mode
+        let is_semantic_only = types_to_generate.iter().all(|qt| *qt == QueryType::Semantic);
+
         let qrels = match config.scoring_mode {
             ScoringMode::Source => {
                 scorer
@@ -934,8 +937,9 @@ async fn run_generation(
             ScoringMode::Pooled => {
                 // Collect all queries for pooled scoring
                 let all_queries: Vec<_> = all_query_doc_pairs.iter().map(|(q, _)| q.clone()).collect();
+                // For semantic queries, filter out candidates with word overlap
                 scorer
-                    .score_pooled(&all_queries, &documents, config.pool_size, config.concurrency)
+                    .score_pooled_with_options(&all_queries, &documents, config.pool_size, config.concurrency, is_semantic_only)
                     .await?
             }
             ScoringMode::Exhaustive => {
@@ -1438,6 +1442,9 @@ async fn run_remix(
         info!("Scoring relevance (mode: {}, concurrency: {})...", scoring_mode, concurrency);
         let scorer = RelevanceScorer::new(&provider, false);
 
+        // Check if we're in semantic mode (all query types are semantic)
+        let is_semantic_only = query_types.iter().all(|qt| *qt == QueryType::Semantic);
+
         let all_qrels = match scoring_mode {
             ScoringMode::Source => {
                 scorer
@@ -1445,8 +1452,9 @@ async fn run_remix(
                     .await?
             }
             ScoringMode::Pooled => {
+                // For semantic queries, filter out candidates with word overlap
                 scorer
-                    .score_pooled(&all_queries, &documents, pool_size, concurrency)
+                    .score_pooled_with_options(&all_queries, &documents, pool_size, concurrency, is_semantic_only)
                     .await?
             }
             ScoringMode::Exhaustive => {

@@ -4,7 +4,7 @@ use crate::output::{BeirDocument, BeirQuery, Qrel};
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
@@ -12,6 +12,53 @@ use tantivy::schema::{Schema, Value, STORED, STRING, TEXT};
 use tantivy::{doc, Index, IndexWriter, ReloadPolicy, TantivyDocument};
 use tokio::sync::Semaphore;
 use tracing::{debug, info};
+
+/// Minimum word length for overlap checking
+const MIN_WORD_LENGTH: usize = 3;
+
+/// Check if query has word overlap with document text
+/// Returns true if there's any overlap
+fn has_word_overlap(query: &str, document: &str) -> bool {
+    // Normalize and tokenize document
+    let doc_words: HashSet<String> = document
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= MIN_WORD_LENGTH)
+        .map(|w| w.to_string())
+        .collect();
+
+    // Tokenize query
+    let query_lower = query.to_lowercase();
+    let query_words: Vec<String> = query_lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= MIN_WORD_LENGTH)
+        .map(|w| w.to_string())
+        .collect();
+
+    for word in &query_words {
+        // Check exact match
+        if doc_words.contains(word) {
+            return true;
+        }
+        // Check stem overlap (first 4-6 chars)
+        let word_chars: Vec<char> = word.chars().collect();
+        if word_chars.len() >= 4 {
+            for doc_word in &doc_words {
+                let doc_chars: Vec<char> = doc_word.chars().collect();
+                if doc_chars.len() >= 4 {
+                    let min_len = word_chars.len().min(doc_chars.len()).min(6);
+                    let word_prefix: String = word_chars[..min_len].iter().collect();
+                    let doc_prefix: String = doc_chars[..min_len].iter().collect();
+                    if word_prefix == doc_prefix {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    false
+}
 
 /// Score relevance between queries and documents
 pub struct RelevanceScorer<'a> {
@@ -372,12 +419,26 @@ impl<'a> RelevanceScorer<'a> {
     }
 
     /// Score queries using BM25 pooling + cliff detection for many-to-many mappings
+    /// When semantic_mode is true, filters out candidates that have word overlap with the query
     pub async fn score_pooled(
         &self,
         queries: &[BeirQuery],
         documents: &[BeirDocument],
         pool_size: usize,
         concurrency: usize,
+    ) -> Result<Vec<Qrel>> {
+        self.score_pooled_with_options(queries, documents, pool_size, concurrency, false).await
+    }
+
+    /// Score queries using BM25 pooling with semantic filtering option
+    /// When semantic_mode is true, filters out candidates that have word overlap with the query
+    pub async fn score_pooled_with_options(
+        &self,
+        queries: &[BeirQuery],
+        documents: &[BeirDocument],
+        pool_size: usize,
+        concurrency: usize,
+        semantic_mode: bool,
     ) -> Result<Vec<Qrel>> {
         info!("Building BM25 index for {} documents...", documents.len());
         let (index, schema) = self.build_bm25_index(documents)?;
@@ -387,6 +448,7 @@ impl<'a> RelevanceScorer<'a> {
 
         let concurrency = concurrency.max(1);
         let mut all_qrels = Vec::new();
+        let mut total_filtered = 0usize;
 
         let pb = ProgressBar::new(queries.len() as u64);
         pb.set_style(
@@ -397,8 +459,26 @@ impl<'a> RelevanceScorer<'a> {
         );
 
         for query in queries {
-            // Step 1: Get BM25 candidates
-            let candidates = self.get_bm25_candidates(query, &index, &schema, pool_size)?;
+            // Step 1: Get BM25 candidates (get more than needed since we'll filter)
+            let fetch_size = if semantic_mode { pool_size * 3 } else { pool_size };
+            let mut candidates = self.get_bm25_candidates(query, &index, &schema, fetch_size)?;
+
+            // Step 1.5: For semantic mode, filter out candidates with word overlap
+            if semantic_mode {
+                let before_count = candidates.len();
+                candidates.retain(|doc_id| {
+                    if let Some(doc) = doc_map.get(doc_id.as_str()) {
+                        let full_text = format!("{} {}", doc.title, doc.text);
+                        !has_word_overlap(&query.text, &full_text)
+                    } else {
+                        false
+                    }
+                });
+                let filtered = before_count - candidates.len();
+                total_filtered += filtered;
+                // Truncate to pool_size after filtering
+                candidates.truncate(pool_size);
+            }
 
             if candidates.is_empty() {
                 pb.inc(1);
@@ -467,6 +547,12 @@ impl<'a> RelevanceScorer<'a> {
         }
 
         pb.finish_with_message("Pooled scoring complete");
+        if semantic_mode && total_filtered > 0 {
+            info!(
+                "Filtered {} candidate docs with word overlap (semantic mode)",
+                total_filtered
+            );
+        }
         info!(
             "Generated {} relevance judgments using pooled scoring",
             all_qrels.len()
