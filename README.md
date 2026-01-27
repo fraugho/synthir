@@ -14,6 +14,8 @@ A Rust CLI tool that generates high-quality synthetic information retrieval data
 - **Checkpointing**: Resume interrupted generation runs
 - **Hard Negative Mining**: BM25 + LLM validation for challenging negative examples
 - **BEIR Format**: Output compatible with standard IR evaluation frameworks
+- **Multi-Locale Support**: Automatically processes all locales in multi-language datasets
+- **Language-Aware Generation**: Detects language from existing queries (or documents) and generates new queries in that language
 
 ## Installation
 
@@ -108,6 +110,7 @@ synthir remix [OPTIONS] --source <SOURCE>
 | `-j, --concurrency` | Concurrent LLM requests | 1 |
 | `--scoring-mode` | Scoring mode: `source`, `pooled`, or `exhaustive` | source |
 | `--pool-size` | Pool size for pooled scoring | 30 |
+| `--trust-locale` | Trust locale directory names for language (e.g., fr-fr → French) | false |
 | `--dry-run` | Preview what would happen | false |
 
 **Examples:**
@@ -137,6 +140,35 @@ synthir remix --source ./NFCorpus --output-name test --dry-run
 
 The tool auto-detects the format and preserves qrels splits (train/dev/test) with original ratios.
 
+**Multi-Locale Datasets:**
+
+Datasets with locale subdirectories (e.g., `fr-fr`, `de-de`, `ja-jp`) are fully supported:
+
+```
+CCOCR/
+├── ar-sa/
+│   ├── label.json
+│   └── queries.json
+├── de-de/
+├── es-es/
+├── fr-fr/
+├── it-it/
+└── ja-jp/
+```
+
+All locales are automatically detected and processed. Query generation uses the appropriate language:
+
+- **Default**: LLM detects language from existing queries (falls back to documents if no queries exist)
+- **With `--trust-locale`**: Uses locale directory name (e.g., `fr-fr` → French)
+
+```bash
+# Auto-detect language via LLM (default)
+synthir remix --source ./CCOCR --output-name CCOCR-semantic --api-key YOUR_KEY
+
+# Trust locale names for faster processing
+synthir remix --source ./CCOCR --output-name CCOCR-semantic --trust-locale --api-key YOUR_KEY
+```
+
 **Cross-Platform Compatibility:**
 
 All file readers handle different line endings automatically:
@@ -165,6 +197,7 @@ synthir remix-batch [OPTIONS] --source <DIRECTORY>
 | `-j, --concurrency` | Concurrent LLM requests | 1 |
 | `--scoring-mode` | Scoring mode: `source`, `pooled`, or `exhaustive` | source |
 | `--pool-size` | Pool size for pooled scoring | 30 |
+| `--trust-locale` | Trust locale directory names for language (e.g., fr-fr → French) | false |
 | `--dry-run` | Preview what would happen | false |
 
 **Output Naming:** `{original-name}-{query-type}` (e.g., `WindowsAppSearch-semantic`)

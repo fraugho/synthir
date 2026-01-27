@@ -140,6 +140,8 @@ pub struct DatasetInfo {
     pub qrels_paths: Vec<std::path::PathBuf>,
     /// Locale subdirectory if present (e.g., "en-us")
     pub locale: Option<String>,
+    /// All locale subdirectories (for multi-language datasets)
+    pub all_locales: Vec<String>,
 }
 
 /// Detect dataset format and gather structure info
@@ -149,13 +151,15 @@ pub fn detect_dataset(path: &Path) -> Result<DatasetInfo> {
         anyhow::bail!("Dataset path must be a directory: {}", path.display());
     }
 
+    // Find all locale subdirectories
+    let all_locales = find_all_locale_subdirs(path);
+
     // First check for locale subdirectory (common in eval datasets)
-    let (effective_dir, locale) = if let Some(locale_dir) = find_locale_subdir(path) {
-        let locale_name = locale_dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(String::from);
-        (locale_dir, locale_name)
+    let (effective_dir, locale) = if !all_locales.is_empty() {
+        // Use first locale for detection, but store all
+        let first_locale = &all_locales[0];
+        let locale_dir = path.join(first_locale);
+        (locale_dir, Some(first_locale.clone()))
     } else {
         (path.to_path_buf(), None)
     };
@@ -175,6 +179,7 @@ pub fn detect_dataset(path: &Path) -> Result<DatasetInfo> {
             },
             qrels_paths: vec![], // OCR embeds qrels in queries.json
             locale,
+            all_locales,
         });
     }
 
@@ -195,6 +200,7 @@ pub fn detect_dataset(path: &Path) -> Result<DatasetInfo> {
             },
             qrels_paths,
             locale,
+            all_locales,
         });
     }
 
@@ -204,30 +210,36 @@ pub fn detect_dataset(path: &Path) -> Result<DatasetInfo> {
     );
 }
 
-/// Find locale subdirectory (e.g., en-us)
-fn find_locale_subdir(path: &Path) -> Option<std::path::PathBuf> {
-    let entries = fs::read_dir(path).ok()?;
+/// Find all locale subdirectories (e.g., en-us, fr-fr, de-de)
+fn find_all_locale_subdirs(path: &Path) -> Vec<String> {
+    let mut locales = Vec::new();
+
+    let entries = match fs::read_dir(path) {
+        Ok(e) => e,
+        Err(_) => return locales,
+    };
 
     for entry in entries.flatten() {
         let entry_path = entry.path();
         if entry_path.is_dir() {
-            let name = entry.file_name();
-            let name_str = name.to_str()?;
-            // Common locale patterns
-            if name_str.contains('-') && name_str.len() <= 10 {
-                // Check if it contains corpus or label files
-                if entry_path.join("corpus.jsonl").exists()
-                    || entry_path.join("label.json").exists()
-                {
-                    return Some(entry_path);
+            if let Some(name_str) = entry.file_name().to_str() {
+                // Common locale patterns: xx-xx or xx_XX
+                if name_str.contains('-') && name_str.len() <= 10 {
+                    // Check if it contains corpus or label files
+                    if entry_path.join("corpus.jsonl").exists()
+                        || entry_path.join("label.json").exists()
+                    {
+                        locales.push(name_str.to_string());
+                    }
                 }
             }
         }
     }
 
-    None
+    // Sort for deterministic ordering
+    locales.sort();
+    locales
 }
-
 /// Find all qrels files in a BEIR dataset
 fn find_qrels_files(path: &Path) -> Vec<std::path::PathBuf> {
     let mut qrels = Vec::new();

@@ -322,6 +322,14 @@ impl LLMProvider {
         self.generate_with_retry(None, prompt, OutputType::Topic)
             .await
     }
+
+    /// Detect language from text samples
+    /// Returns the detected language name (e.g., "French", "German", "Japanese")
+    pub async fn detect_language(&self, prompt: &str) -> Result<String> {
+        // Use Topic output type since we expect a single word/short phrase
+        self.generate_with_retry(None, prompt, OutputType::Topic)
+            .await
+    }
 }
 
 

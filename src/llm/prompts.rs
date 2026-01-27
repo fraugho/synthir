@@ -331,6 +331,46 @@ Be specific and interesting, like:
 Output ONLY the topic name, 2-5 words, nothing else."#
 }
 
+/// Prompt for language detection
+/// Takes multiple text samples and asks LLM to identify the language
+pub fn language_detection_prompt(samples: &[&str]) -> String {
+    let samples_text = samples
+        .iter()
+        .enumerate()
+        .map(|(i, s)| format!("Sample {}:\n\"\"\"\n{}\n\"\"\"", i + 1, s))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    format!(
+        r#"Identify the language of these text samples.
+
+{}
+
+What language are these samples written in?
+
+IMPORTANT:
+- Look at ALL samples and determine the PRIMARY language
+- If samples are mixed languages, identify the MAJORITY language
+- Use the standard English name for the language (e.g., "French", "German", "Japanese", "English")
+
+Output ONLY the language name, nothing else. Single word like: English, French, German, Japanese, Spanish, Italian, Arabic, Chinese, Korean, Portuguese, Russian, etc."#,
+        samples_text
+    )
+}
+
+/// Add language instruction to a query prompt if language is specified
+pub fn with_language_instruction(prompt: String, language: Option<&str>) -> String {
+    match language {
+        Some(lang) if lang.to_lowercase() != "english" => {
+            format!(
+                "{}\n\nIMPORTANT: Generate the query in {}. Do NOT translate to English.",
+                prompt, lang
+            )
+        }
+        _ => prompt,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

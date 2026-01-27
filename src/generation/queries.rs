@@ -2,7 +2,7 @@ use crate::checkpoint::{CheckpointManager, ProgressState};
 use crate::config::QueryType;
 use crate::llm::{
     academic_query_prompt, basic_query_prompt, complex_query_prompt, keyword_query_prompt,
-    natural_query_prompt, semantic_query_prompt, LLMProvider,
+    natural_query_prompt, semantic_query_prompt, with_language_instruction, LLMProvider,
 };
 use crate::output::{append_query, BeirDocument, BeirQuery};
 use anyhow::Result;
@@ -18,11 +18,18 @@ use tracing::info;
 pub struct QueryGenerator<'a> {
     provider: &'a LLMProvider,
     dry_run: bool,
+    language: Option<String>,
 }
 
 impl<'a> QueryGenerator<'a> {
     pub fn new(provider: &'a LLMProvider, dry_run: bool) -> Self {
-        Self { provider, dry_run }
+        Self { provider, dry_run, language: None }
+    }
+
+    /// Set the target language for query generation
+    pub fn with_language(mut self, language: Option<String>) -> Self {
+        self.language = language;
+        self
     }
 
     /// Generate a single query for a document
@@ -45,7 +52,7 @@ impl<'a> QueryGenerator<'a> {
             });
         }
 
-        let prompt = match query_type {
+        let base_prompt = match query_type {
             QueryType::Natural => natural_query_prompt(&doc.text),
             QueryType::Keyword => keyword_query_prompt(&doc.text),
             QueryType::Academic => academic_query_prompt(&doc.text),
@@ -57,6 +64,9 @@ impl<'a> QueryGenerator<'a> {
                 unreachable!("Mixed query type should be handled by generate_mixed")
             }
         };
+
+        // Add language instruction if specified
+        let prompt = with_language_instruction(base_prompt, self.language.as_deref());
 
         let text = self.provider.generate_query(&prompt).await?;
 
@@ -233,7 +243,7 @@ impl<'a> QueryGenerator<'a> {
                     doc.id
                 )
             } else {
-                let prompt = match query_type {
+                let base_prompt = match query_type {
                     QueryType::Natural => natural_query_prompt(&doc.text),
                     QueryType::Keyword => keyword_query_prompt(&doc.text),
                     QueryType::Academic => academic_query_prompt(&doc.text),
@@ -242,6 +252,7 @@ impl<'a> QueryGenerator<'a> {
                     QueryType::Basic => basic_query_prompt(&doc.text),
                     QueryType::Mixed => unreachable!(),
                 };
+                let prompt = with_language_instruction(base_prompt, self.language.as_deref());
                 self.provider.generate_query(&prompt).await?
             };
 
