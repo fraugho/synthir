@@ -16,7 +16,7 @@ use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
 /// Maximum retries for semantic queries with word overlap
-const MAX_SEMANTIC_RETRIES: usize = 3;
+const MAX_SEMANTIC_RETRIES: usize = 5;
 
 /// Minimum word length to consider for overlap checking
 const MIN_WORD_LENGTH: usize = 3;
@@ -136,6 +136,7 @@ impl<'a> QueryGenerator<'a> {
     }
 
     /// Generate semantic query with retry on word overlap
+    /// Returns Err if all retries exhausted with overlap still present
     async fn generate_semantic_with_retry(
         &self,
         doc_text: &str,
@@ -167,12 +168,11 @@ impl<'a> QueryGenerator<'a> {
             }
         }
 
-        // All retries exhausted, return last query with warning
-        warn!(
-            "Semantic query '{}' still has overlap {:?} after {} retries, using anyway",
+        // All retries exhausted - return error to try different document
+        Err(anyhow::anyhow!(
+            "Semantic query '{}' still has overlap {:?} after {} retries",
             last_query, last_overlaps, MAX_SEMANTIC_RETRIES
-        );
-        Ok(last_query)
+        ))
     }
 
     /// Generate queries for all documents of a specific type
@@ -257,6 +257,10 @@ impl<'a> QueryGenerator<'a> {
         // Generate queries concurrently in batches
         let semaphore = Arc::new(Semaphore::new(concurrency));
 
+        // For semantic queries, track failed (query_idx, attempts) to retry with different docs
+        let mut retry_queue: Vec<(usize, usize)> = Vec::new(); // (query_idx, attempt_count)
+        const MAX_DOC_RETRIES: usize = 3; // Try up to 3 different documents
+
         for chunk in pending.chunks(concurrency * 2) {
             let futures: Vec<_> = chunk
                 .iter()
@@ -266,7 +270,7 @@ impl<'a> QueryGenerator<'a> {
                     async move {
                         let _permit = sem.acquire().await.unwrap();
                         let result = self.generate_one(&doc, query_type, query_idx).await;
-                        (query_idx, doc.id.clone(), result)
+                        (query_idx, doc_idx, doc.id.clone(), result)
                     }
                 })
                 .collect();
@@ -278,22 +282,75 @@ impl<'a> QueryGenerator<'a> {
 
             // Sort by query index to maintain order
             let mut sorted_results: Vec<_> = batch_results.into_iter().collect();
-            sorted_results.sort_by_key(|(idx, _, _)| *idx);
+            sorted_results.sort_by_key(|(idx, _, _, _)| *idx);
 
-            for (query_idx, doc_id, result) in sorted_results {
-                let query = result?;
-                let query_id = format!("{}_{:06}", query_type.as_str(), query_idx + 1);
+            for (query_idx, _doc_idx, doc_id, result) in sorted_results {
+                match result {
+                    Ok(query) => {
+                        let query_id = format!("{}_{:06}", query_type.as_str(), query_idx + 1);
 
-                // Append to file
-                append_query(output_path, &query)?;
+                        // Append to file
+                        append_query(output_path, &query)?;
 
-                // Update progress
-                state.mark_query_completed(query_type, &query_id);
-                checkpoint_mgr.record_and_maybe_save(state)?;
+                        // Update progress
+                        state.mark_query_completed(query_type, &query_id);
+                        checkpoint_mgr.record_and_maybe_save(state)?;
 
-                results.push((query, doc_id));
-                pb.inc(1);
+                        results.push((query, doc_id));
+                        pb.inc(1);
+                    }
+                    Err(e) if query_type == QueryType::Semantic => {
+                        // For semantic queries, queue for retry with different document
+                        warn!("Query {} failed: {}, will retry with different document", query_idx, e);
+                        retry_queue.push((query_idx, 1));
+                    }
+                    Err(e) => {
+                        // For other query types, propagate the error
+                        return Err(e);
+                    }
+                }
             }
+        }
+
+        // Process retry queue for semantic queries with different documents
+        while !retry_queue.is_empty() {
+            let mut next_retry_queue: Vec<(usize, usize)> = Vec::new();
+
+            for (query_idx, attempt) in retry_queue.drain(..) {
+                if attempt >= MAX_DOC_RETRIES {
+                    warn!(
+                        "Semantic query {} failed after {} document attempts, skipping",
+                        query_idx, MAX_DOC_RETRIES
+                    );
+                    pb.inc(1); // Still increment progress
+                    continue;
+                }
+
+                // Pick a random different document
+                let doc_idx = (query_idx + attempt * 7) % documents.len(); // Simple pseudo-random
+                let doc = &documents[doc_idx];
+
+                let result = self.generate_one(doc, query_type, query_idx).await;
+
+                match result {
+                    Ok(query) => {
+                        let query_id = format!("{}_{:06}", query_type.as_str(), query_idx + 1);
+                        append_query(output_path, &query)?;
+                        state.mark_query_completed(query_type, &query_id);
+                        checkpoint_mgr.record_and_maybe_save(state)?;
+                        results.push((query, doc.id.clone()));
+                        pb.inc(1);
+                        info!("Semantic query {} succeeded with document {} on attempt {}",
+                              query_idx, doc.id, attempt + 1);
+                    }
+                    Err(e) => {
+                        warn!("Semantic query {} failed with doc {}: {}", query_idx, doc.id, e);
+                        next_retry_queue.push((query_idx, attempt + 1));
+                    }
+                }
+            }
+
+            retry_queue = next_retry_queue;
         }
 
         pb.finish_with_message(format!("{} query generation complete", query_type));
