@@ -342,6 +342,196 @@ Built-in topics:
 | `basic` | Partial keyword matching | Doc: "Emperor Penguin Encyclopedia" → "penguin book" |
 | `mixed` | Random mix of all types | - |
 
+### Query Generation Prompts
+
+Below are the actual prompts used for each query type. Feedback welcome!
+
+<details>
+<summary><strong>natural</strong> - Casual Google-style questions</summary>
+
+```
+You generate REALISTIC Google search questions that regular people type.
+
+Document:
+"""
+{document_text}
+"""
+
+Generate a casual question a normal person would Google:
+- Simple, everyday language (NOT academic or formal)
+- Like texting a friend or asking Google
+- May be grammatically imperfect or lowercase
+- Short and to the point (under 12 words usually)
+- Examples of REAL natural searches:
+  - "how do i fix a leaky faucet"
+  - "is it bad to eat expired yogurt"
+  - "why does my dog keep scratching"
+  - "whats the best way to learn python"
+  - "can you freeze cooked pasta"
+  - "how long to boil eggs"
+
+The question should be answerable by the document.
+
+Output ONLY the question, nothing else.
+```
+</details>
+
+<details>
+<summary><strong>keyword</strong> - Messy user searches (may have typos)</summary>
+
+```
+You generate REALISTIC search queries that mimic how real users type.
+
+Document:
+"""
+{document_text}
+"""
+
+Generate a keyword search like a REAL person would type into Google:
+- 1-4 words, usually incomplete fragments
+- May have typos or misspellings (about 15% of real searches do)
+- No perfect grammar - just quick search terms
+- Often missing words or using shorthand
+- Examples of REAL keyword searches:
+  - "pasta recipe easy"
+  - "why wont car start"
+  - "best laptop 2024"
+  - "headache wont go away"
+  - "recipie chicken" (typo)
+  - "python tutorial beginer" (typo)
+  - "how to"
+  - "iphone not charging"
+
+Output ONLY the search terms, nothing else. No quotes.
+```
+</details>
+
+<details>
+<summary><strong>academic</strong> - Formal, detailed queries</summary>
+
+```
+You generate detailed, academic-style queries for information retrieval.
+
+Document:
+"""
+{document_text}
+"""
+
+Generate a formal, detailed query that a researcher or expert might use:
+- Specific terminology and precise language
+- Well-structured question or information need
+- May reference specific concepts, methods, or metrics
+- Longer and more detailed than typical user searches
+- Examples of academic queries:
+  - "What is the correlation between urban green space coverage and PM2.5 reduction in metropolitan areas?"
+  - "How does the Maillard reaction temperature affect flavor compound formation in bread crusts?"
+  - "What are the primary mechanisms by which SSRIs modulate serotonin reuptake in synaptic clefts?"
+  - "How do transformer attention mechanisms compare to LSTM gates for sequence modeling?"
+
+The document should contain information relevant to this query.
+
+Output ONLY the query, nothing else.
+```
+</details>
+
+<details>
+<summary><strong>complex</strong> - Multi-hop reasoning queries</summary>
+
+```
+You generate search queries for information retrieval datasets.
+
+Document:
+"""
+{document_text}
+"""
+
+Generate a complex query that requires reasoning to connect to this document.
+Examples of complex queries:
+- Comparative: "difference between X and Y"
+- Multi-step: "how to do X after Y"
+- Conditional: "best approach for X when Y"
+
+The document should be relevant to answering this query, but not trivially so.
+
+Output ONLY the query, nothing else. No quotes, no explanation.
+```
+</details>
+
+<details>
+<summary><strong>semantic</strong> - Zero lexical overlap (tests embeddings)</summary>
+
+```
+You generate document-finding queries that test SEMANTIC retrieval over lexical matching.
+
+Document:
+"""
+{document_text}
+"""
+
+Generate a query someone would use to FIND this document, but with ZERO lexical overlap:
+- This is a DOCUMENT SEARCH, not a question - you're looking for this document to exist
+- Use BROADER CATEGORIES, SYNONYMS, or CONCEPTUAL descriptions
+- A BM25/TF-IDF/keyword search MUST FAIL (no shared words or stems)
+- Only an embedding-based search should find this document
+
+CRITICAL RULES:
+- Read the FULL document content above, not just any title
+- NO words from the document (not even morphological variants like run/running)
+- NO proper nouns, names, or specific terms from the document
+- Think: "What category or concept does this document's CONTENT fall under?"
+- Think: "What would someone search if they vaguely remembered what this was about?"
+
+Examples (showing how content maps to queries):
+- Doc about emperor penguins, their habitat, breeding -> Query: "bird books" or "antarctic wildlife"
+- Doc explaining car maintenance steps for a sedan -> Query: "vehicle upkeep guide"
+- Doc with French pastry recipes and techniques -> Query: "European dessert baking methods"
+- Doc discussing Byzantine church construction -> Query: "eastern roman building styles"
+- Doc teaching pandas, numpy, data analysis -> Query: "programming analytics manual"
+- Doc about fixing air conditioning and heating -> Query: "residential climate control repair"
+
+The query should be 2-6 words, like a library catalog search based on the document's content.
+
+Output ONLY the query, nothing else.
+```
+</details>
+
+<details>
+<summary><strong>basic</strong> - Partial keyword matching</summary>
+
+```
+You generate document-finding queries with PARTIAL keyword matching.
+
+Document:
+"""
+{document_text}
+"""
+
+Generate a query someone would use to FIND this document, with SOME but NOT ALL keywords matching:
+- This is a DOCUMENT SEARCH - you're looking for this document
+- Include 1-2 words that appear in the document
+- OMIT other key identifying words to make it a partial match
+- BM25/lexical search should find this, but not as the top result
+- Query should be incomplete or abbreviated
+
+RULES:
+- Read the FULL document content above
+- Pick the most descriptive 2-4 words, dropping some key terms
+- Keep it like a quick, lazy search someone might type
+
+Examples (showing partial keyword retention):
+- Doc: "Encyclopedia of Emperor Penguins" -> Query: "penguin book" (dropped "emperor", "encyclopedia")
+- Doc: "Toyota Camry 2019 Owner's Manual" -> Query: "camry manual" (dropped "toyota", "2019", "owner")
+- Doc: "Introduction to Machine Learning with Python" -> Query: "machine learning python" (dropped "introduction")
+- Doc: "The Complete Guide to Mediterranean Cooking" -> Query: "mediterranean recipes" (dropped "complete", "guide", changed "cooking")
+- Doc: "Advanced Cardiovascular Life Support Manual" -> Query: "cardiac life support" (dropped "advanced", changed "cardiovascular")
+- Doc about fixing iPhone battery issues -> Query: "iphone battery" (partial match)
+
+The query should be 2-4 words with partial overlap.
+
+Output ONLY the query, nothing else.
+```
+</details>
+
 ### Semantic vs Basic Query Types
 
 Both `semantic` and `basic` are designed to test retrieval beyond exact keyword matching:
@@ -401,6 +591,29 @@ Relevance scores (TREC scale, default):
 - 1 = Marginally relevant
 - 2 = Relevant
 - 3 = Highly relevant
+
+<details>
+<summary><strong>Relevance Scoring Prompt</strong></summary>
+
+```
+You are a relevance judge for information retrieval.
+
+Query: "{query}"
+
+Document:
+"""
+{document_text}
+"""
+
+Rate the document's relevance to the query on a 0-3 scale:
+0 = Not relevant (document does not help answer the query)
+1 = Marginally relevant (mentions related concepts but doesn't answer)
+2 = Relevant (partially answers or is useful for the query)
+3 = Highly relevant (directly and completely answers the query)
+
+Output ONLY a single digit (0, 1, 2, or 3). Nothing else.
+```
+</details>
 
 ## Score Scales
 
