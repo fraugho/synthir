@@ -461,38 +461,43 @@ Output ONLY the query, nothing else. No quotes, no explanation.
 <summary><strong>semantic</strong> - Zero lexical overlap (tests embeddings)</summary>
 
 ```
-You generate document-finding queries that test SEMANTIC retrieval over lexical matching.
+Generate a search query with ABSOLUTELY ZERO word overlap with the document.
 
 Document:
 """
 {document_text}
 """
 
-Generate a query someone would use to FIND this document, but with ZERO lexical overlap:
-- This is a DOCUMENT SEARCH, not a question - you're looking for this document to exist
-- Use BROADER CATEGORIES, SYNONYMS, or CONCEPTUAL descriptions
-- A BM25/TF-IDF/keyword search MUST FAIL (no shared words or stems)
-- Only an embedding-based search should find this document
+TASK: Create a query to find this document using ONLY synonyms and category terms.
 
-CRITICAL RULES:
-- Read the FULL document content above, not just any title
-- NO words from the document (not even morphological variants like run/running)
-- NO proper nouns, names, or specific terms from the document
-- Think: "What category or concept does this document's CONTENT fall under?"
-- Think: "What would someone search if they vaguely remembered what this was about?"
+STRICT RULES - YOUR QUERY WILL BE AUTOMATICALLY REJECTED IF:
+- ANY word from your query appears in the document (even partial matches)
+- You use morphological variants (enzyme/enzymes, test/testing, cell/cells)
+- You use any proper nouns, names, or specific terms from the document
 
-Examples (showing how content maps to queries):
-- Doc about emperor penguins, their habitat, breeding -> Query: "bird books" or "antarctic wildlife"
-- Doc explaining car maintenance steps for a sedan -> Query: "vehicle upkeep guide"
-- Doc with French pastry recipes and techniques -> Query: "European dessert baking methods"
-- Doc discussing Byzantine church construction -> Query: "eastern roman building styles"
-- Doc teaching pandas, numpy, data analysis -> Query: "programming analytics manual"
-- Doc about fixing air conditioning and heating -> Query: "residential climate control repair"
+WHAT TO DO:
+1. Identify the TOPIC/CATEGORY of the document (not specific terms)
+2. Use COMPLETELY DIFFERENT words that mean similar things
+3. Think: "How would I describe this to someone without using any words from it?"
 
-The query should be 2-6 words, like a library catalog search based on the document's content.
+GOOD EXAMPLES (zero overlap):
+- Doc about "enzyme activity temperature experiment" -> "biological catalyst thermal behavior"
+- Doc about "cell membrane transport" -> "biological barrier movement mechanisms"
+- Doc about "Berlin restaurant Italian food" -> "European dining establishment"
+- Doc about "iPhone battery not charging" -> "mobile device power issues"
+- Doc about "Python machine learning tutorial" -> "programming AI educational guide"
+
+BAD EXAMPLES (has overlap - REJECTED):
+- Doc about "enzyme activity" -> "enzyme testing" (WRONG: "enzyme" appears in doc)
+- Doc about "Berlin restaurant" -> "Berlin food" (WRONG: "Berlin" appears in doc)
+- Doc about "cell biology" -> "cell processes" (WRONG: "cell" appears in doc)
+
+Your query must be 2-6 words using ONLY words that DO NOT appear in the document above.
 
 Output ONLY the query, nothing else.
 ```
+
+**Note:** Semantic queries are validated for word overlap and regenerated up to 3 times if overlap is detected.
 </details>
 
 <details>

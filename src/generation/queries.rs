@@ -9,10 +9,58 @@ use anyhow::Result;
 use futures::stream::{self, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::prelude::{IndexedRandom, SliceRandom};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tracing::info;
+use tracing::{info, warn};
+
+/// Maximum retries for semantic queries with word overlap
+const MAX_SEMANTIC_RETRIES: usize = 3;
+
+/// Minimum word length to consider for overlap checking
+const MIN_WORD_LENGTH: usize = 3;
+
+/// Check if query has word overlap with document text
+/// Returns the overlapping words if any
+fn check_word_overlap(query: &str, document: &str) -> Vec<String> {
+    // Normalize and tokenize document
+    let doc_words: HashSet<String> = document
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() >= MIN_WORD_LENGTH)
+        .map(|w| w.to_string())
+        .collect();
+
+    // Tokenize query and check against document
+    let query_lower = query.to_lowercase();
+    let query_words: Vec<&str> = query_lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() >= MIN_WORD_LENGTH)
+        .collect();
+
+    let mut overlaps = Vec::new();
+    for word in query_words {
+        // Check exact match
+        if doc_words.contains(word) {
+            overlaps.push(word.to_string());
+            continue;
+        }
+        // Check stem overlap (simple: check if word is prefix/suffix of any doc word or vice versa)
+        for doc_word in &doc_words {
+            if word.len() >= 4 && doc_word.len() >= 4 {
+                // Check if they share a common stem (first 4+ chars)
+                let min_len = word.len().min(doc_word.len()).min(6);
+                if word[..min_len] == doc_word[..min_len] {
+                    overlaps.push(format!("{}~{}", word, doc_word));
+                    break;
+                }
+            }
+        }
+    }
+
+    overlaps
+}
 
 /// Generate queries for documents
 pub struct QueryGenerator<'a> {
@@ -68,9 +116,55 @@ impl<'a> QueryGenerator<'a> {
         // Add language instruction if specified
         let prompt = with_language_instruction(base_prompt, self.language.as_deref());
 
+        // For semantic queries, retry if there's word overlap
+        if query_type == QueryType::Semantic {
+            let text = self.generate_semantic_with_retry(&doc.text, &prompt).await?;
+            return Ok(BeirQuery { id: query_id, text });
+        }
+
         let text = self.provider.generate_query(&prompt).await?;
 
         Ok(BeirQuery { id: query_id, text })
+    }
+
+    /// Generate semantic query with retry on word overlap
+    async fn generate_semantic_with_retry(
+        &self,
+        doc_text: &str,
+        prompt: &str,
+    ) -> Result<String> {
+        let mut last_query = String::new();
+        let mut last_overlaps = Vec::new();
+
+        for attempt in 0..MAX_SEMANTIC_RETRIES {
+            let query = self.provider.generate_query(prompt).await?;
+            let overlaps = check_word_overlap(&query, doc_text);
+
+            if overlaps.is_empty() {
+                // No overlap, success!
+                if attempt > 0 {
+                    info!("Semantic query succeeded on attempt {}: '{}'", attempt + 1, query);
+                }
+                return Ok(query);
+            }
+
+            last_query = query.clone();
+            last_overlaps = overlaps.clone();
+
+            if attempt + 1 < MAX_SEMANTIC_RETRIES {
+                warn!(
+                    "Semantic query '{}' has word overlap {:?}, retrying ({}/{})",
+                    query, overlaps, attempt + 1, MAX_SEMANTIC_RETRIES
+                );
+            }
+        }
+
+        // All retries exhausted, return last query with warning
+        warn!(
+            "Semantic query '{}' still has overlap {:?} after {} retries, using anyway",
+            last_query, last_overlaps, MAX_SEMANTIC_RETRIES
+        );
+        Ok(last_query)
     }
 
     /// Generate queries for all documents of a specific type
@@ -253,7 +347,12 @@ impl<'a> QueryGenerator<'a> {
                     QueryType::Mixed => unreachable!(),
                 };
                 let prompt = with_language_instruction(base_prompt, self.language.as_deref());
-                self.provider.generate_query(&prompt).await?
+                // Use retry logic for semantic queries in mixed mode too
+                if query_type == QueryType::Semantic {
+                    self.generate_semantic_with_retry(&doc.text, &prompt).await?
+                } else {
+                    self.provider.generate_query(&prompt).await?
+                }
             };
 
             let query = BeirQuery { id: query_id.clone(), text };
