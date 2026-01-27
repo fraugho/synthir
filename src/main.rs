@@ -237,9 +237,9 @@ enum Commands {
         #[arg(short = 'n', long)]
         output_name: Option<String>,
 
-        /// Output directory (dataset will be created as subdirectory)
-        #[arg(short, long, default_value = "./datasets")]
-        output: PathBuf,
+        /// Output directory (dataset will be created as subdirectory). Defaults to source's parent directory.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
 
         /// Replace queries/qrels in-place (modifies source dataset directly)
         #[arg(long)]
@@ -268,6 +268,14 @@ enum Commands {
         /// Number of concurrent LLM requests
         #[arg(short = 'j', long, default_value = "1")]
         concurrency: usize,
+
+        /// Scoring mode: source (1-to-1), pooled (BM25 candidates), exhaustive (all pairs)
+        #[arg(long, default_value = "source")]
+        scoring_mode: String,
+
+        /// Pool size for pooled scoring (top-k docs per query)
+        #[arg(long, default_value = "30")]
+        pool_size: usize,
 
         /// Verbose output
         #[arg(short, long)]
@@ -515,6 +523,8 @@ async fn main() -> Result<()> {
             model,
             api_key,
             concurrency,
+            scoring_mode,
+            pool_size,
             verbose,
             dry_run,
         } => {
@@ -541,6 +551,9 @@ async fn main() -> Result<()> {
             let selected_query_types = parse_query_types(&query_types)
                 .map_err(|e| anyhow::anyhow!("Invalid query types: {}", e))?;
 
+            let scoring: ScoringMode = scoring_mode.parse()
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
             run_remix(
                 source,
                 output_name,
@@ -552,6 +565,8 @@ async fn main() -> Result<()> {
                 model,
                 api_key,
                 concurrency,
+                scoring,
+                pool_size,
                 dry_run,
             )
             .await?;
@@ -975,7 +990,7 @@ fn chrono_lite_timestamp() -> String {
 async fn run_remix(
     source: PathBuf,
     output_name: Option<String>,
-    output_dir: PathBuf,
+    output_dir: Option<PathBuf>,
     in_place: bool,
     query_types: Vec<QueryType>,
     queries_per_type: Option<usize>,
@@ -983,6 +998,8 @@ async fn run_remix(
     model: String,
     api_key: String,
     concurrency: usize,
+    scoring_mode: ScoringMode,
+    pool_size: usize,
     dry_run: bool,
 ) -> Result<()> {
     // Detect source dataset format
@@ -1037,7 +1054,11 @@ async fn run_remix(
     } else {
         // Clone mode: create new dataset
         let name = output_name.as_ref().unwrap();
-        let dest = output_dir.join(name);
+        // Default output_dir to source's parent directory
+        let base_dir = output_dir.unwrap_or_else(|| {
+            source.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."))
+        });
+        let dest = base_dir.join(name);
         let effective = if let Some(locale) = &dataset_info.locale {
             dest.join(locale)
         } else {
@@ -1114,6 +1135,9 @@ async fn run_remix(
     let mut state = ProgressState::new(config.clone());
     let mut checkpoint_mgr = CheckpointManager::new(effective_dest.clone(), 50);
 
+    // Collect all query-doc pairs first
+    let mut all_query_doc_pairs: Vec<(BeirQuery, String)> = Vec::new();
+
     for query_type in &query_types {
         if *query_type == QueryType::Mixed {
             continue; // Handle mixed separately
@@ -1136,13 +1160,7 @@ async fn run_remix(
             .await?;
 
         all_queries.extend(pairs.iter().map(|(q, _)| q.clone()));
-
-        // Score relevance
-        let scorer = RelevanceScorer::new(&provider, false);
-        let qrels = scorer
-            .score_source_pairs_concurrent(&pairs, &documents, concurrency)
-            .await?;
-        all_qrels.extend(qrels);
+        all_query_doc_pairs.extend(pairs);
 
         // Clean up temp file
         let _ = std::fs::remove_file(&temp_queries_path);
@@ -1170,15 +1188,32 @@ async fn run_remix(
             .collect();
 
         all_queries.extend(pairs.iter().map(|(q, _)| q.clone()));
-
-        let scorer = RelevanceScorer::new(&provider, false);
-        let qrels = scorer
-            .score_source_pairs_concurrent(&pairs, &documents, concurrency)
-            .await?;
-        all_qrels.extend(qrels);
+        all_query_doc_pairs.extend(pairs);
 
         let _ = std::fs::remove_file(&temp_mixed_path);
     }
+
+    // Score relevance based on scoring mode
+    info!("Scoring relevance (mode: {}, concurrency: {})...", scoring_mode, concurrency);
+    let scorer = RelevanceScorer::new(&provider, false);
+
+    all_qrels = match scoring_mode {
+        ScoringMode::Source => {
+            scorer
+                .score_source_pairs_concurrent(&all_query_doc_pairs, &documents, concurrency)
+                .await?
+        }
+        ScoringMode::Pooled => {
+            scorer
+                .score_pooled(&all_queries, &documents, pool_size, concurrency)
+                .await?
+        }
+        ScoringMode::Exhaustive => {
+            scorer
+                .score_exhaustive(&all_queries, &documents, concurrency)
+                .await?
+        }
+    };
 
     // Write output based on format
     match dataset_info.format {

@@ -279,11 +279,11 @@ pub fn analyze_qrels_splits(info: &DatasetInfo) -> Result<Vec<QrelsSplit>> {
     if info.format == DatasetFormat::Ocr {
         // OCR format has qrels embedded in queries.json
         if let Some(queries_path) = &info.queries_path {
-            let (_, qrels) = read_ocr_queries(queries_path)?;
+            let (queries, _) = read_ocr_queries(queries_path)?;
             splits.push(QrelsSplit {
                 name: "queries".to_string(),
                 path: queries_path.clone(),
-                count: qrels.len(),
+                count: queries.len(), // Number of queries, not qrels
             });
         }
     } else {

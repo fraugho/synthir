@@ -102,23 +102,29 @@ synthir remix [OPTIONS] --source <SOURCE>
 | `-s, --source` | Path to source dataset (auto-detects format) | required |
 | `-n, --output-name` | Name for output dataset | - |
 | `--in-place` | Modify source dataset directly | false |
-| `-o, --output` | Output directory for cloned dataset | ./datasets |
+| `-o, --output` | Output directory for cloned dataset | source's parent |
 | `--query-types` | Query types to generate | semantic |
 | `-q, --queries-per-type` | Number of queries (or auto from source) | - |
 | `-j, --concurrency` | Concurrent LLM requests | 1 |
+| `--scoring-mode` | Scoring mode: `source`, `pooled`, or `exhaustive` | source |
+| `--pool-size` | Pool size for pooled scoring | 30 |
 | `--dry-run` | Preview what would happen | false |
 
 **Examples:**
 
 ```bash
-# Create semantic variant of NFCorpus
+# Create semantic variant of NFCorpus (output: ./semantic_nfcorpus next to source)
 synthir remix --source ./NFCorpus --output-name semantic_nfcorpus --api-key YOUR_KEY
 
-# Create basic (partial keyword) variant
-synthir remix --source ./NFCorpus --output-name basic_nfcorpus --query-types basic --api-key YOUR_KEY
+# Create basic (partial keyword) variant with pooled scoring
+synthir remix --source ./NFCorpus --output-name basic_nfcorpus \
+  --query-types basic --scoring-mode pooled --api-key YOUR_KEY
 
 # Replace queries in-place (useful for fixing malformed datasets)
 synthir remix --source ./GoodNotesOCR --in-place --query-types semantic --api-key YOUR_KEY
+
+# Output to specific directory instead of next to source
+synthir remix --source ./NFCorpus --output-name test --output ./my-datasets --api-key YOUR_KEY
 
 # Preview changes without executing
 synthir remix --source ./NFCorpus --output-name test --dry-run
@@ -130,6 +136,15 @@ synthir remix --source ./NFCorpus --output-name test --dry-run
 - **OCR**: `label.json`, `queries.json` (GoodNotes-style)
 
 The tool auto-detects the format and preserves qrels splits (train/dev/test) with original ratios.
+
+**Cross-Platform Compatibility:**
+
+All file readers handle different line endings automatically:
+- Unix/Linux: LF (`\n`)
+- Windows: CRLF (`\r\n`)
+- Classic Mac: CR (`\r`)
+
+This ensures datasets created on any platform can be read correctly.
 
 ### `queries` - Generate Queries for Existing Corpus
 

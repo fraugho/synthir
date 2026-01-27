@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 /// A document in BEIR corpus format
@@ -89,18 +89,20 @@ pub fn write_qrels(path: &Path, qrels: &[Qrel]) -> Result<()> {
 }
 
 /// Read documents from a BEIR corpus.jsonl file
+/// Handles all line endings: LF (Unix), CRLF (Windows), CR (old Mac)
 pub fn read_corpus(path: &Path) -> Result<Vec<BeirDocument>> {
-    let file = File::open(path)
+    let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to open corpus file: {}", path.display()))?;
-    let reader = BufReader::new(file);
+
+    // Normalize line endings: CRLF -> LF, CR -> LF
+    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
 
     let mut documents = Vec::new();
-    for (line_num, line) in reader.lines().enumerate() {
-        let line = line?;
+    for (line_num, line) in normalized.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        let doc: BeirDocument = serde_json::from_str(&line)
+        let doc: BeirDocument = serde_json::from_str(line)
             .with_context(|| format!("Failed to parse document at line {}", line_num + 1))?;
         documents.push(doc);
     }
@@ -109,18 +111,20 @@ pub fn read_corpus(path: &Path) -> Result<Vec<BeirDocument>> {
 }
 
 /// Read queries from a BEIR queries.jsonl file
+/// Handles all line endings: LF (Unix), CRLF (Windows), CR (old Mac)
 pub fn read_queries(path: &Path) -> Result<Vec<BeirQuery>> {
-    let file = File::open(path)
+    let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to open queries file: {}", path.display()))?;
-    let reader = BufReader::new(file);
+
+    // Normalize line endings: CRLF -> LF, CR -> LF
+    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
 
     let mut queries = Vec::new();
-    for (line_num, line) in reader.lines().enumerate() {
-        let line = line?;
+    for (line_num, line) in normalized.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        let query: BeirQuery = serde_json::from_str(&line)
+        let query: BeirQuery = serde_json::from_str(line)
             .with_context(|| format!("Failed to parse query at line {}", line_num + 1))?;
         queries.push(query);
     }
@@ -129,14 +133,16 @@ pub fn read_queries(path: &Path) -> Result<Vec<BeirQuery>> {
 }
 
 /// Read qrels from a BEIR qrels.tsv file
+/// Handles all line endings: LF (Unix), CRLF (Windows), CR (old Mac)
 pub fn read_qrels(path: &Path) -> Result<Vec<Qrel>> {
-    let file = File::open(path)
+    let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to open qrels file: {}", path.display()))?;
-    let reader = BufReader::new(file);
+
+    // Normalize line endings: CRLF -> LF, CR -> LF
+    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
 
     let mut qrels = Vec::new();
-    for (line_num, line) in reader.lines().enumerate() {
-        let line = line?;
+    for (line_num, line) in normalized.lines().enumerate() {
         // Skip header
         if line_num == 0 && line.starts_with("query-id") {
             continue;
