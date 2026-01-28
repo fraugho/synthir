@@ -116,8 +116,10 @@ impl<'a> QueryGenerator<'a> {
             QueryType::Semantic => semantic_query_prompt(&doc.text),
             QueryType::Basic => basic_query_prompt(&doc.text),
             QueryType::Mixed => {
-                // Should not be called directly for mixed type
                 unreachable!("Mixed query type should be handled by generate_mixed")
+            }
+            QueryType::Translate => {
+                unreachable!("Translate is handled separately in run_remix")
             }
         };
 
@@ -438,6 +440,7 @@ impl<'a> QueryGenerator<'a> {
                     QueryType::Semantic => semantic_query_prompt(&doc.text),
                     QueryType::Basic => basic_query_prompt(&doc.text),
                     QueryType::Mixed => unreachable!(),
+                    QueryType::Translate => unreachable!(),
                 };
                 let prompt = with_language_instruction(base_prompt, self.language.as_deref());
                 // Use retry logic for semantic queries in mixed mode too

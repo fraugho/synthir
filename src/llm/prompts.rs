@@ -74,7 +74,7 @@ Document:
 """
 
 Generate a keyword search like a REAL person would type into Google:
-- 1-4 words, usually incomplete fragments
+- 2-6 words, usually incomplete fragments
 - May have typos or misspellings (about 15% of real searches do)
 - No perfect grammar - just quick search terms
 - Often missing words or using shorthand
@@ -373,6 +373,31 @@ pub fn with_language_instruction(prompt: String, language: Option<&str>) -> Stri
         _ => prompt,
     }
 }
+
+/// Prompt for translating a query to a target language
+pub fn translation_prompt(query: &str, target_language: &str) -> String {
+    format!(
+        r#"Translate this search query to {}.
+
+Query: "{}"
+
+RULES:
+- Translate naturally, not word-for-word
+- Keep the same search intent and meaning
+- Use natural phrasing a {} speaker would use
+- If the query contains proper nouns, keep them as-is or use the common {} form
+
+Output ONLY the translated query, nothing else. /no_think"#,
+        target_language, query, target_language, target_language
+    )
+}
+
+/// Default languages for translation mode
+pub const DEFAULT_TRANSLATE_LANGUAGES: &[&str] = &[
+    "Spanish", "French", "German", "Japanese", "Chinese",
+    "Arabic", "Korean", "Portuguese", "Russian", "Italian",
+    "Dutch", "Polish", "Turkish", "Vietnamese", "Thai",
+];
 
 #[cfg(test)]
 mod tests {

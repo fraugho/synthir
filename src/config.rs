@@ -156,6 +156,8 @@ pub enum QueryType {
     Basic,
     /// Mix of all query types
     Mixed,
+    /// Translate existing queries to a random target language (keeps qrels same)
+    Translate,
 }
 
 impl QueryType {
@@ -179,6 +181,7 @@ impl QueryType {
             QueryType::Semantic => "semantic",
             QueryType::Basic => "basic",
             QueryType::Mixed => "mixed",
+            QueryType::Translate => "translate",
         }
     }
 }
@@ -201,6 +204,7 @@ impl std::str::FromStr for QueryType {
             "semantic" => Ok(QueryType::Semantic),
             "basic" => Ok(QueryType::Basic),
             "mixed" => Ok(QueryType::Mixed),
+            "translate" => Ok(QueryType::Translate),
             _ => Err(format!("Invalid query type: {}", s)),
         }
     }

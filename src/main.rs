@@ -6,7 +6,7 @@ use synthir::{
     checkpoint::{CheckpointManager, GenerationPhase, ProgressState},
     config::{parse_query_types, GenerationConfig, OnExist, OutputMode, QueryType, RuntimeOptions, ScoreScale, ScoringMode},
     generation::{DocumentGenerator, QueryGenerator, RelevanceScorer},
-    llm::{topic_generation_prompt, LLMProvider, LLMProviderConfig, MultiEndpointProvider, LanguageDetector, locale_to_language, EmbeddingClient},
+    llm::{topic_generation_prompt, translation_prompt, DEFAULT_TRANSLATE_LANGUAGES, LLMProvider, LLMProviderConfig, MultiEndpointProvider, LanguageDetector, locale_to_language, EmbeddingClient},
     meta::{run_meta_generation, MetaConfig},
     mining::HardNegativeMiner,
     output::{
@@ -296,6 +296,11 @@ enum Commands {
         /// Trust locale directory names (e.g., fr-fr → French) instead of detecting language with LLM
         #[arg(long)]
         trust_locale: bool,
+
+        /// Languages for translate mode (comma-separated). Randomly picks one per dataset.
+        /// Default: Spanish,French,German,Japanese,Chinese,Arabic,Korean,Portuguese,Russian,Italian
+        #[arg(long, value_name = "LANGS")]
+        translate_languages: Option<String>,
     },
 
     /// Batch remix all compatible datasets in a directory
@@ -371,6 +376,11 @@ enum Commands {
         /// Trust locale directory names (e.g., fr-fr → French) instead of detecting language with LLM
         #[arg(long)]
         trust_locale: bool,
+
+        /// Languages for translate mode (comma-separated). Randomly picks one per dataset.
+        /// Default: Spanish,French,German,Japanese,Chinese,Arabic,Korean,Portuguese,Russian,Italian
+        #[arg(long, value_name = "LANGS")]
+        translate_languages: Option<String>,
     },
 }
 
@@ -617,6 +627,7 @@ async fn main() -> Result<()> {
             verbose,
             dry_run,
             trust_locale,
+            translate_languages,
         } => {
             let level = if verbose { Level::DEBUG } else { Level::INFO };
             let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
@@ -644,6 +655,10 @@ async fn main() -> Result<()> {
             let scoring: ScoringMode = scoring_mode.parse()
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
 
+            let translate_langs: Vec<String> = translate_languages
+                .map(|s| s.split(',').map(|l| l.trim().to_string()).collect())
+                .unwrap_or_else(|| DEFAULT_TRANSLATE_LANGUAGES.iter().map(|s| s.to_string()).collect());
+
             run_remix(
                 source,
                 output_name,
@@ -661,6 +676,7 @@ async fn main() -> Result<()> {
                 pool_size,
                 dry_run,
                 trust_locale,
+                translate_langs,
             )
             .await?;
 
@@ -688,6 +704,7 @@ async fn main() -> Result<()> {
             quiet,
             dry_run,
             trust_locale,
+            translate_languages,
         } => {
             let level = if verbose { Level::DEBUG } else if quiet { Level::WARN } else { Level::INFO };
             let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
@@ -719,6 +736,13 @@ async fn main() -> Result<()> {
                 .parse()
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
 
+            // Parse translate languages
+            let translate_langs: Vec<String> = translate_languages
+                .map(|s| s.split(',').map(|l| l.trim().to_string()).collect())
+                .unwrap_or_else(|| {
+                    DEFAULT_TRANSLATE_LANGUAGES.iter().map(|s| s.to_string()).collect()
+                });
+
             run_remix_batch(
                 source,
                 output_mode,
@@ -736,6 +760,7 @@ async fn main() -> Result<()> {
                 pool_size,
                 dry_run,
                 trust_locale,
+                translate_langs,
             )
             .await?;
         }
@@ -1266,6 +1291,7 @@ async fn run_remix(
     pool_size: usize,
     dry_run: bool,
     trust_locale: bool,
+    translate_langs: Vec<String>,
 ) -> Result<()> {
     // Detect source dataset format
     info!("Detecting dataset format for {}...", source.display());
@@ -1500,6 +1526,112 @@ async fn run_remix(
             }
         }
 
+        // Handle translate mode specially - read existing queries and translate them
+        if query_types.contains(&QueryType::Translate) {
+            // Pick a random language for this dataset
+            use rand::seq::IndexedRandom;
+            let mut rng = rand::rng();
+            let target_lang = translate_langs.choose(&mut rng)
+                .cloned()
+                .unwrap_or_else(|| "Spanish".to_string());
+
+            // Skip if detected language matches target language
+            if let Some(ref detected) = detected_language {
+                if detected.to_lowercase() == target_lang.to_lowercase() {
+                    info!("Skipping translate: detected language '{}' matches target '{}'", detected, target_lang);
+                    continue;
+                }
+            }
+
+            info!("Translate mode: translating queries to {}", target_lang);
+
+            // Read existing queries from source
+            let source_queries_path = match dataset_info.format {
+                DatasetFormat::Ocr => source_locale_dir.join("queries.json"),
+                DatasetFormat::Beir => source_locale_dir.join("queries.jsonl"),
+            };
+
+            if !source_queries_path.exists() {
+                anyhow::bail!("Translate mode requires existing queries at {}", source_queries_path.display());
+            }
+
+            let (source_queries, source_qrels): (Vec<BeirQuery>, Vec<synthir::output::Qrel>) = match dataset_info.format {
+                DatasetFormat::Ocr => {
+                    read_ocr_queries(&source_queries_path)?
+                }
+                DatasetFormat::Beir => {
+                    (synthir::output::read_queries(&source_queries_path)?, Vec::new())
+                }
+            };
+
+            info!("Loaded {} queries to translate", source_queries.len());
+
+            // Translate queries concurrently
+            let pb = indicatif::ProgressBar::new(source_queries.len() as u64);
+            pb.set_style(
+                indicatif::ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} translating ({eta})")
+                    .unwrap()
+                    .progress_chars("#>-"),
+            );
+            pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
+            let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
+            let target_lang_ref = &target_lang;
+            let provider_ref = &provider;
+
+            let translate_futures: Vec<_> = source_queries.iter().map(|q| {
+                let sem = semaphore.clone();
+                let query_id = q.id.clone();
+                let query_text = q.text.clone();
+                async move {
+                    let _permit = sem.acquire().await.unwrap();
+                    let prompt = translation_prompt(&query_text, target_lang_ref);
+                    let translated = provider_ref.generate_query(&prompt).await?;
+                    Ok::<_, anyhow::Error>(BeirQuery { id: query_id, text: translated })
+                }
+            }).collect();
+
+            use futures::StreamExt;
+            let translated_queries: Vec<BeirQuery> = futures::stream::iter(translate_futures)
+                .buffer_unordered(concurrency)
+                .map(|r| {
+                    pb.inc(1);
+                    r
+                })
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()?;
+
+            pb.finish_with_message("Translation complete");
+
+            // Copy existing qrels as-is (same relevance since meaning preserved)
+            match dataset_info.format {
+                DatasetFormat::Ocr => {
+                    // Write translated queries with qrels (already read from source)
+                    write_ocr_queries(&effective_dest.join("queries.json"), &translated_queries, &source_qrels)?;
+                    info!("Wrote {} translated queries with {} qrels", translated_queries.len(), source_qrels.len());
+                }
+                DatasetFormat::Beir => {
+                    // Write translated queries
+                    write_queries(&effective_dest.join("queries.jsonl"), &translated_queries)?;
+                    info!("Wrote {} translated queries", translated_queries.len());
+
+                    // Copy all qrels files as-is
+                    for split in &splits {
+                        let dest_qrels = effective_dest.join(split.path.file_name().unwrap());
+                        std::fs::copy(&split.path, &dest_qrels)?;
+                    }
+                    if !splits.is_empty() {
+                        info!("Copied {} qrels files (unchanged - same relevance)", splits.len());
+                    }
+                }
+            }
+
+            continue; // Skip normal query generation for this locale
+        }
+
         // Generate queries
         let query_gen = QueryGenerator::new(&provider, false).with_language(detected_language.clone());
         let mut all_queries: Vec<BeirQuery> = Vec::new();
@@ -1731,6 +1863,7 @@ async fn run_remix_batch(
     pool_size: usize,
     dry_run: bool,
     trust_locale: bool,
+    translate_langs: Vec<String>,
 ) -> Result<()> {
     info!("Discovering datasets in {}...", source_dir.display());
 
@@ -1876,6 +2009,7 @@ async fn run_remix_batch(
             pool_size,
             dry_run,
             trust_locale,
+            translate_langs.clone(),
         )
         .await
         {
