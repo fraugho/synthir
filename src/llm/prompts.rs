@@ -58,7 +58,7 @@ Generate a casual question a normal person would Google:
 
 The question should be answerable by the document.
 
-Output ONLY the question, nothing else."#,
+Output ONLY the question, nothing else. /no_think"#,
         document_text
     )
 }
@@ -88,7 +88,7 @@ Generate a keyword search like a REAL person would type into Google:
   - "how to"
   - "iphone not charging"
 
-Output ONLY the search terms, nothing else. No quotes."#,
+Output ONLY the search terms, nothing else. No quotes. /no_think"#,
         document_text
     )
 }
@@ -111,7 +111,7 @@ Examples of complex queries:
 
 The document should be relevant to answering this query, but not trivially so.
 
-Output ONLY the query, nothing else. No quotes, no explanation."#,
+Output ONLY the query, nothing else. No quotes, no explanation. /no_think"#,
         document_text
     )
 }
@@ -139,7 +139,7 @@ Generate a formal, detailed query that a researcher or expert might use:
 
 The document should contain information relevant to this query.
 
-Output ONLY the query, nothing else."#,
+Output ONLY the query, nothing else. /no_think"#,
         document_text
     )
 }
@@ -180,7 +180,7 @@ BAD EXAMPLES (has overlap - REJECTED):
 
 Your query must be 2-6 words using ONLY words that DO NOT appear in the document above.
 
-Output ONLY the query, nothing else."#,
+Output ONLY the query, nothing else. /no_think"#,
         document_text
     )
 }
@@ -217,7 +217,7 @@ Examples (showing partial keyword retention):
 
 The query should be 2-4 words with partial overlap.
 
-Output ONLY the query, nothing else."#,
+Output ONLY the query, nothing else. /no_think"#,
         document_text
     )
 }
@@ -240,7 +240,7 @@ Rate the document's relevance to the query on a 0-3 scale:
 2 = Relevant (partially answers or is useful for the query)
 3 = Highly relevant (directly and completely answers the query)
 
-Output ONLY a single digit (0, 1, 2, or 3). Nothing else."#,
+Output ONLY a single digit (0, 1, 2, or 3). Nothing else. /no_think"#,
         query, document_text
     )
 }
@@ -255,7 +255,7 @@ Document:
 {}
 """
 
-Is this document relevant to the query? Answer only "yes" or "no"."#,
+Is this document relevant to the query? Answer only "yes" or "no". /no_think"#,
         query, document_text
     )
 }
@@ -281,7 +281,7 @@ Rate how relevant this document is to the query on a scale of 0-100:
 - 71-90: Highly relevant, directly addresses most of the query
 - 91-100: Perfectly relevant, completely and directly answers the query
 
-Output ONLY a number from 0 to 100. Nothing else."#,
+Output ONLY a number from 0 to 100. Nothing else. /no_think"#,
         query, document_text
     )
 }
@@ -310,7 +310,7 @@ Rate how relevant this document is to the query on a scale of {}-{}:
 - {}-{}: Relevant (partially answers or is useful for the query)
 - {}-{}: Highly relevant (directly and completely answers the query)
 
-Output ONLY a number from {} to {}. Nothing else."#,
+Output ONLY a number from {} to {}. Nothing else. /no_think"#,
         query, document_text,
         min_score, max_score,
         min_score, low_threshold,
@@ -331,7 +331,7 @@ Be specific and interesting, like:
 - "apartment lease agreements"
 - "D&D campaign session notes"
 
-Output ONLY the topic name, 2-5 words, nothing else."#
+Output ONLY the topic name, 2-5 words, nothing else. /no_think"#
 }
 
 /// Prompt for language detection
@@ -356,7 +356,7 @@ IMPORTANT:
 - If samples are mixed languages, identify the MAJORITY language
 - Use the standard English name for the language (e.g., "French", "German", "Japanese", "English")
 
-Output ONLY the language name, nothing else. Single word like: English, French, German, Japanese, Spanish, Italian, Arabic, Chinese, Korean, Portuguese, Russian, etc."#,
+Output ONLY the language name, nothing else. Single word like: English, French, German, Japanese, Spanish, Italian, Arabic, Chinese, Korean, Portuguese, Russian, etc. /no_think"#,
         samples_text
     )
 }

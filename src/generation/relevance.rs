@@ -708,12 +708,32 @@ impl<'a> RelevanceScorer<'a> {
         info!("HNSW index built with {} documents", doc_id_map.len());
 
         // Build doc map for scoring
-        let doc_map: HashMap<&str, &BeirDocument> =
-            documents.iter().map(|d| (d.id.as_str(), d)).collect();
+        let doc_map: HashMap<String, BeirDocument> =
+            documents.iter().map(|d| (d.id.clone(), d.clone())).collect();
 
-        // Step 3: For each query, embed and find candidates, then score
-        let mut all_qrels = Vec::new();
+        // Step 3: Batch embed all queries upfront
+        info!("Embedding {} queries...", queries.len());
+        let pb_query_embed = ProgressBar::new(queries.len() as u64);
+        pb_query_embed.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} queries embedded ({eta})")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
 
+        let mut query_embeddings: HashMap<String, Vec<f32>> = HashMap::new();
+        for chunk in queries.chunks(batch_size) {
+            let texts: Vec<String> = chunk.iter().map(|q| q.text.clone()).collect();
+            let embeddings = embedding_client.embed_batch(&texts).await?;
+
+            for (query, emb) in chunk.iter().zip(embeddings.into_iter()) {
+                query_embeddings.insert(query.id.clone(), emb);
+                pb_query_embed.inc(1);
+            }
+        }
+        pb_query_embed.finish_with_message("Query embedding complete");
+
+        // Step 4: Process all queries concurrently with global semaphore
         let pb = ProgressBar::new(queries.len() as u64);
         pb.set_style(
             ProgressStyle::default_bar()
@@ -722,93 +742,124 @@ impl<'a> RelevanceScorer<'a> {
                 .progress_chars("#>-"),
         );
 
-        for query in queries {
-            // Embed query
-            let query_embedding = embedding_client.embed_one(&query.text).await?;
+        // Global semaphore for LLM calls across all queries
+        let semaphore = Arc::new(Semaphore::new(concurrency));
+        let hnsw = Arc::new(hnsw);
+        let doc_id_map = Arc::new(doc_id_map);
+        let doc_map = Arc::new(doc_map);
+        let query_embeddings = Arc::new(query_embeddings);
+        let pb = Arc::new(pb);
 
-            // Vector search for top-K candidates
-            let mut searcher = Searcher::default();
-            let mut neighbors = vec![space::Neighbor { index: 0, distance: 0 }; pool_size * 2];
-            let found_count = hnsw.nearest(&query_embedding, pool_size * 2, &mut searcher, &mut neighbors).len();
-            neighbors.truncate(found_count);
+        let query_futures: Vec<_> = queries
+            .iter()
+            .map(|query| {
+                let sem = semaphore.clone();
+                let hnsw = hnsw.clone();
+                let doc_id_map = doc_id_map.clone();
+                let doc_map = doc_map.clone();
+                let query_embeddings = query_embeddings.clone();
+                let pb = pb.clone();
+                let query = query.clone();
+                let score_min = self.score_min;
 
-            let mut candidates: Vec<String> = neighbors
-                .iter()
-                .map(|n| doc_id_map[n.index].clone())
-                .collect();
+                async move {
+                    let mut qrels = Vec::new();
 
-            // Filter out candidates with word overlap (should be rare with embeddings)
-            let before_count = candidates.len();
-            candidates.retain(|doc_id| {
-                if let Some(doc) = doc_map.get(doc_id.as_str()) {
-                    let full_text = format!("{} {}", doc.title, doc.text);
-                    !has_word_overlap(&query.text, &full_text)
-                } else {
-                    false
-                }
-            });
-            candidates.truncate(pool_size);
+                    // Get pre-computed query embedding
+                    let query_embedding = match query_embeddings.get(&query.id) {
+                        Some(emb) => emb.clone(),
+                        None => {
+                            pb.inc(1);
+                            return qrels;
+                        }
+                    };
 
-            let filtered = before_count - candidates.len();
-            if filtered > 0 {
-                debug!("Filtered {} candidates with word overlap for query {}", filtered, query.id);
-            }
+                    // Vector search for top-K candidates (fast, in-memory)
+                    let mut searcher = Searcher::default();
+                    let mut neighbors = vec![space::Neighbor { index: 0, distance: 0 }; pool_size * 2];
+                    let found_count = hnsw.nearest(&query_embedding, pool_size * 2, &mut searcher, &mut neighbors).len();
+                    neighbors.truncate(found_count);
 
-            if candidates.is_empty() {
-                pb.inc(1);
-                continue;
-            }
+                    let mut candidates: Vec<String> = neighbors
+                        .iter()
+                        .map(|n| doc_id_map[n.index].clone())
+                        .collect();
 
-            // Score candidates with LLM
-            let semaphore = Arc::new(Semaphore::new(concurrency));
-            let futures: Vec<_> = candidates
-                .iter()
-                .filter_map(|doc_id| doc_map.get(doc_id.as_str()).map(|d| (doc_id.clone(), *d)))
-                .map(|(doc_id, doc)| {
-                    let sem = semaphore.clone();
-                    let q = query.clone();
-                    let d = doc.clone();
-                    async move {
-                        let _permit = sem.acquire().await.unwrap();
-                        let score = self.score_one_fine(&q, &d).await;
-                        (doc_id, score)
+                    // Filter out candidates with word overlap
+                    candidates.retain(|doc_id| {
+                        if let Some(doc) = doc_map.get(doc_id) {
+                            let full_text = format!("{} {}", doc.title, doc.text);
+                            !has_word_overlap(&query.text, &full_text)
+                        } else {
+                            false
+                        }
+                    });
+                    candidates.truncate(pool_size);
+
+                    if candidates.is_empty() {
+                        pb.inc(1);
+                        return qrels;
                     }
-                })
-                .collect();
 
-            let results: Vec<_> = stream::iter(futures)
-                .buffer_unordered(concurrency)
-                .collect()
-                .await;
+                    // Score candidates with LLM (using global semaphore)
+                    let candidate_futures: Vec<_> = candidates
+                        .iter()
+                        .filter_map(|doc_id| doc_map.get(doc_id).map(|d| (doc_id.clone(), d.clone())))
+                        .map(|(doc_id, doc)| {
+                            let sem = sem.clone();
+                            let q = query.clone();
+                            async move {
+                                let _permit = sem.acquire().await.unwrap();
+                                let score = self.score_one_fine(&q, &doc).await;
+                                (doc_id, score)
+                            }
+                        })
+                        .collect();
 
-            // Collect and sort scores
-            let mut scored: Vec<(String, u8)> = Vec::new();
-            for (doc_id, result) in results {
-                if let Ok(score) = result {
-                    scored.push((doc_id, score));
+                    let results: Vec<_> = stream::iter(candidate_futures)
+                        .buffer_unordered(pool_size)
+                        .collect()
+                        .await;
+
+                    // Collect and sort scores
+                    let mut scored: Vec<(String, u8)> = Vec::new();
+                    for (doc_id, result) in results {
+                        if let Ok(score) = result {
+                            scored.push((doc_id, score));
+                        }
+                    }
+                    scored.sort_by(|a, b| b.1.cmp(&a.1));
+
+                    // Detect cliff and convert to output scores
+                    let cliff_idx = Self::detect_cliff(&scored);
+
+                    for (i, (doc_id, fine_score)) in scored.iter().enumerate() {
+                        let output_score = if i < cliff_idx {
+                            self.fine_to_output(*fine_score)
+                        } else {
+                            score_min
+                        };
+
+                        qrels.push(Qrel {
+                            query_id: query.id.clone(),
+                            doc_id: doc_id.clone(),
+                            score: output_score,
+                        });
+                    }
+
+                    pb.inc(1);
+                    qrels
                 }
-            }
-            scored.sort_by(|a, b| b.1.cmp(&a.1));
+            })
+            .collect();
 
-            // Detect cliff and convert to output scores
-            let cliff_idx = Self::detect_cliff(&scored);
+        // Run all queries concurrently - semaphore limits total LLM calls
+        let all_results: Vec<Vec<Qrel>> = stream::iter(query_futures)
+            .buffer_unordered(queries.len())
+            .collect()
+            .await;
 
-            for (i, (doc_id, fine_score)) in scored.iter().enumerate() {
-                let output_score = if i < cliff_idx {
-                    self.fine_to_output(*fine_score)
-                } else {
-                    self.score_min
-                };
-
-                all_qrels.push(Qrel {
-                    query_id: query.id.clone(),
-                    doc_id: doc_id.clone(),
-                    score: output_score,
-                });
-            }
-
-            pb.inc(1);
-        }
+        let all_qrels: Vec<Qrel> = all_results.into_iter().flatten().collect();
 
         pb.finish_with_message("Semantic pooled scoring complete");
         info!(

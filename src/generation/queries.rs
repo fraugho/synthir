@@ -222,6 +222,7 @@ impl<'a> QueryGenerator<'a> {
                 .unwrap()
                 .progress_chars("#>-"),
         );
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
         let mut rng = rand::rng();
         let mut doc_indices: Vec<usize> = (0..documents.len()).collect();
@@ -312,39 +313,65 @@ impl<'a> QueryGenerator<'a> {
             }
         }
 
-        // Process retry queue for semantic queries with different documents
+        // Process retry queue for semantic queries with different documents (CONCURRENTLY)
         while !retry_queue.is_empty() {
             let mut next_retry_queue: Vec<(usize, usize)> = Vec::new();
 
-            for (query_idx, attempt) in retry_queue.drain(..) {
-                if attempt >= MAX_DOC_RETRIES {
-                    warn!(
-                        "Semantic query {} failed after {} document attempts, skipping",
-                        query_idx, MAX_DOC_RETRIES
-                    );
-                    pb.inc(1); // Still increment progress
-                    continue;
-                }
+            // Filter out exhausted retries first
+            let to_process: Vec<_> = retry_queue
+                .drain(..)
+                .filter(|(query_idx, attempt)| {
+                    if *attempt >= MAX_DOC_RETRIES {
+                        warn!(
+                            "Semantic query {} failed after {} document attempts, skipping",
+                            query_idx, MAX_DOC_RETRIES
+                        );
+                        pb.inc(1);
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect();
 
-                // Pick a random different document
-                let doc_idx = (query_idx + attempt * 7) % documents.len(); // Simple pseudo-random
-                let doc = &documents[doc_idx];
+            if to_process.is_empty() {
+                break;
+            }
 
-                let result = self.generate_one(doc, query_type, query_idx).await;
+            // Process retries concurrently
+            let retry_futures: Vec<_> = to_process
+                .into_iter()
+                .map(|(query_idx, attempt)| {
+                    let sem = semaphore.clone();
+                    let doc_idx = (query_idx + attempt * 7) % documents.len();
+                    let doc = documents[doc_idx].clone();
+                    async move {
+                        let _permit = sem.acquire().await.unwrap();
+                        let result = self.generate_one(&doc, query_type, query_idx).await;
+                        (query_idx, doc.id.clone(), attempt, result)
+                    }
+                })
+                .collect();
 
+            let retry_results: Vec<_> = stream::iter(retry_futures)
+                .buffer_unordered(concurrency)
+                .collect()
+                .await;
+
+            for (query_idx, doc_id, attempt, result) in retry_results {
                 match result {
                     Ok(query) => {
                         let query_id = format!("{}_{:06}", query_type.as_str(), query_idx + 1);
                         append_query(output_path, &query)?;
                         state.mark_query_completed(query_type, &query_id);
                         checkpoint_mgr.record_and_maybe_save(state)?;
-                        results.push((query, doc.id.clone()));
+                        results.push((query, doc_id.clone()));
                         pb.inc(1);
                         info!("Semantic query {} succeeded with document {} on attempt {}",
-                              query_idx, doc.id, attempt + 1);
+                              query_idx, doc_id, attempt + 1);
                     }
                     Err(e) => {
-                        warn!("Semantic query {} failed with doc {}: {}", query_idx, doc.id, e);
+                        warn!("Semantic query {} failed with doc {}: {}", query_idx, doc_id, e);
                         next_retry_queue.push((query_idx, attempt + 1));
                     }
                 }
@@ -378,6 +405,7 @@ impl<'a> QueryGenerator<'a> {
                 .unwrap()
                 .progress_chars("#>-"),
         );
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
         let mut rng = rand::rng();
         let query_types = QueryType::all_types();

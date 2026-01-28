@@ -122,6 +122,7 @@ impl LLMProvider {
             model: self.model.clone(),
             messages,
             temperature: Some(0.7),
+            max_completion_tokens: Some(512),  // Limit output length to avoid runaway generation
             ..Default::default()
         };
 
@@ -143,9 +144,19 @@ impl LLMProvider {
         Ok(content)
     }
 
+    /// Strip Qwen3-style thinking tags from output
+    fn strip_think_tags(s: &str) -> &str {
+        // Handle <think>...</think> blocks from Qwen3 models
+        if let Some(end_pos) = s.find("</think>") {
+            s[end_pos + 8..].trim_start()
+        } else {
+            s
+        }
+    }
+
     /// Parse LLM output based on expected type
     pub fn parse_output(raw: &str, expected: OutputType) -> Result<String, LLMError> {
-        let cleaned = raw.trim();
+        let cleaned = Self::strip_think_tags(raw.trim());
 
         match expected {
             OutputType::Score => {

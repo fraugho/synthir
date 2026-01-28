@@ -360,6 +360,10 @@ enum Commands {
         #[arg(short, long)]
         verbose: bool,
 
+        /// Quiet mode - only show progress bars, suppress INFO logs
+        #[arg(long)]
+        quiet: bool,
+
         /// Dry run - show what would happen without LLM calls
         #[arg(long)]
         dry_run: bool,
@@ -681,10 +685,11 @@ async fn main() -> Result<()> {
             scoring_mode,
             pool_size,
             verbose,
+            quiet,
             dry_run,
             trust_locale,
         } => {
-            let level = if verbose { Level::DEBUG } else { Level::INFO };
+            let level = if verbose { Level::DEBUG } else if quiet { Level::WARN } else { Level::INFO };
             let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
             tracing::subscriber::set_global_default(subscriber)?;
 

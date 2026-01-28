@@ -179,10 +179,16 @@ impl<'a> LanguageDetector<'a> {
 /// Clean up language name from LLM output
 /// Just trims whitespace and capitalizes first letter - trusts LLM to output standard English names
 fn clean_language_name(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    // Strip Qwen3-style thinking tags
+    let stripped = if let Some(end_pos) = raw.find("</think>") {
+        raw[end_pos + 8..].trim()
+    } else {
+        raw.trim()
+    };
+    if stripped.is_empty() {
         return "English".to_string();
     }
+    let trimmed = stripped;
     // Just capitalize first letter, keep the rest as-is
     let mut chars = trimmed.chars();
     match chars.next() {
