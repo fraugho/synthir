@@ -1,6 +1,80 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Document diversity mode - how to ensure unique documents
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DocDiversity {
+    /// No diversity checking (fastest, may produce similar docs)
+    #[default]
+    None,
+    /// Two-phase: generate title first, check for duplicates, then expand
+    TwoPhase,
+    /// Embedding-based: reject docs too similar to existing ones
+    Embedding,
+}
+
+impl std::fmt::Display for DocDiversity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DocDiversity::None => write!(f, "none"),
+            DocDiversity::TwoPhase => write!(f, "two-phase"),
+            DocDiversity::Embedding => write!(f, "embedding"),
+        }
+    }
+}
+
+impl std::str::FromStr for DocDiversity {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().replace('_', "-").as_str() {
+            "none" => Ok(DocDiversity::None),
+            "two-phase" | "twophase" => Ok(DocDiversity::TwoPhase),
+            "embedding" => Ok(DocDiversity::Embedding),
+            _ => Err(format!(
+                "Invalid doc diversity mode: {}. Use 'none', 'two-phase', or 'embedding'",
+                s
+            )),
+        }
+    }
+}
+
+/// Query diversity mode - how to ensure unique queries
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QueryDiversity {
+    /// Exact string deduplication only (current behavior)
+    #[default]
+    Exact,
+    /// Embedding-based: reject queries too similar to existing ones
+    Embedding,
+}
+
+impl std::fmt::Display for QueryDiversity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            QueryDiversity::Exact => write!(f, "exact"),
+            QueryDiversity::Embedding => write!(f, "embedding"),
+        }
+    }
+}
+
+impl std::str::FromStr for QueryDiversity {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "exact" => Ok(QueryDiversity::Exact),
+            "embedding" => Ok(QueryDiversity::Embedding),
+            _ => Err(format!(
+                "Invalid query diversity mode: {}. Use 'exact' or 'embedding'",
+                s
+            )),
+        }
+    }
+}
+
 /// Scoring mode for relevance judgments
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -278,6 +352,25 @@ pub struct GenerationConfig {
 
     /// Maximum score for custom range (inclusive)
     pub score_max: u16,
+
+    /// Document diversity mode
+    pub doc_diversity: DocDiversity,
+
+    /// Query diversity mode
+    pub query_diversity: QueryDiversity,
+
+    /// Similarity threshold for embedding-based deduplication (0.0-1.0)
+    /// Higher = stricter (rejects more similar items)
+    pub diversity_threshold: f32,
+
+    /// Document categories for forced diversity (e.g., "soup,main,dessert")
+    pub doc_categories: Option<Vec<String>>,
+
+    /// Embedding API URL (for diversity checking, defaults to base_url)
+    pub embedding_url: Option<String>,
+
+    /// Embedding model (defaults to main model)
+    pub embedding_model: Option<String>,
 }
 
 impl Default for GenerationConfig {
@@ -299,6 +392,12 @@ impl Default for GenerationConfig {
             score_scale: ScoreScale::Trec,
             score_min: 0,
             score_max: 3,
+            doc_diversity: DocDiversity::None,
+            query_diversity: QueryDiversity::Exact,
+            diversity_threshold: 0.85,
+            doc_categories: None,
+            embedding_url: None,
+            embedding_model: None,
         }
     }
 }

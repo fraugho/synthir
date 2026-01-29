@@ -78,6 +78,7 @@ pub struct ScoreRange {
 /// LLM provider that wraps async-openai for OpenAI-compatible APIs
 pub struct LLMProvider {
     client: Client<OpenAIConfig>,
+    base_url: String,
     model: String,
     max_retries: u32,
 }
@@ -93,9 +94,20 @@ impl LLMProvider {
 
         Ok(Self {
             client,
+            base_url: config.base_url,
             model: config.model,
             max_retries: config.max_retries,
         })
+    }
+
+    /// Get the base URL
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Get the model name
+    pub fn model(&self) -> &str {
+        &self.model
     }
 
     /// Send a completion request to the LLM
@@ -247,12 +259,16 @@ impl LLMProvider {
     }
 
     /// Generate a document
+    /// Note: System prompt is merged into user prompt for compatibility with models
+    /// that don't support system messages (e.g., some vLLM chat templates)
     pub async fn generate_document(
         &self,
         system_prompt: &str,
         user_prompt: &str,
     ) -> Result<String> {
-        self.generate_with_retry(Some(system_prompt), user_prompt, OutputType::Document)
+        // Merge system prompt into user prompt for broader model compatibility
+        let combined_prompt = format!("{}\n\n{}", system_prompt, user_prompt);
+        self.generate_with_retry(None, &combined_prompt, OutputType::Document)
             .await
     }
 
@@ -452,8 +468,12 @@ impl MultiEndpointProvider {
     }
 
     /// Generate a document
+    /// Note: System prompt is merged into user prompt for compatibility with models
+    /// that don't support system messages (e.g., some vLLM chat templates)
     pub async fn generate_document(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
-        self.next_provider().generate_document(system_prompt, user_prompt).await
+        // Merge system prompt into user prompt for broader model compatibility
+        let combined_prompt = format!("{}\n\n{}", system_prompt, user_prompt);
+        self.next_provider().generate_with_retry(None, &combined_prompt, OutputType::Document).await
     }
 
     /// Generate a query

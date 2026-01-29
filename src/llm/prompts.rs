@@ -33,6 +33,70 @@ Output ONLY the document text, nothing else."#,
     )
 }
 
+/// Prompt for two-phase document generation: first generate a title/concept
+pub fn document_idea_prompt(topic_config: &TopicConfig, existing_ideas: &[String], category: Option<&str>) -> String {
+    let exclusion = if existing_ideas.is_empty() {
+        String::new()
+    } else {
+        let ideas_list = existing_ideas.iter()
+            .take(50) // Limit context size
+            .map(|s| format!("- {}", s))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            r#"
+
+IMPORTANT: Do NOT generate any of these already-used ideas:
+{}
+
+Your idea must be DIFFERENT from all of the above."#,
+            ideas_list
+        )
+    };
+
+    let category_instruction = category.map(|c| format!(
+        "\n\nCATEGORY CONSTRAINT: The document MUST be about: {}", c
+    )).unwrap_or_default();
+
+    format!(
+        r#"Generate a unique title/concept for a {} document.
+
+Requirements:
+- Style: {}
+- Be specific and creative
+- This will become a full document later{}{}
+
+Output ONLY a short title or concept (5-15 words), nothing else. /no_think"#,
+        topic_config.name,
+        topic_config.style_description,
+        category_instruction,
+        exclusion
+    )
+}
+
+/// Prompt to expand a document idea into a full document
+pub fn document_expand_prompt(topic_config: &TopicConfig, idea: &str) -> String {
+    format!(
+        r#"Expand this concept into a full {} document:
+
+Concept: "{}"
+
+Requirements:
+- Length: {}-{} words
+- Style: {}
+- Include realistic details a real document would have
+{}
+
+Output ONLY the document content, nothing else."#,
+        topic_config.name,
+        idea,
+        topic_config.min_words,
+        topic_config.max_words,
+        topic_config.style_description,
+        topic_config.specific_instructions
+    )
+}
+
 /// Prompt for natural language query generation (casual Google-style)
 pub fn natural_query_prompt(document_text: &str) -> String {
     format!(

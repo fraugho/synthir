@@ -1,8 +1,10 @@
 use crate::checkpoint::{CheckpointManager, ProgressState};
-use crate::config::QueryType;
+use crate::config::{QueryDiversity, QueryType};
+use crate::generation::QueryDiversityChecker;
 use crate::llm::{
     academic_query_prompt, basic_query_prompt, complex_query_prompt, keyword_query_prompt,
-    natural_query_prompt, semantic_query_prompt, with_language_instruction, LLMProvider,
+    natural_query_prompt, semantic_query_prompt, with_language_instruction, EmbeddingClient,
+    LLMProvider,
 };
 use crate::output::{append_query, BeirDocument, BeirQuery};
 use anyhow::Result;
@@ -13,7 +15,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Maximum retries for semantic queries with word overlap
 const MAX_SEMANTIC_RETRIES: usize = 5;
@@ -70,16 +72,49 @@ fn check_word_overlap(query: &str, document: &str) -> Vec<String> {
     overlaps
 }
 
+/// Configuration for query diversity checking
+#[derive(Clone)]
+pub struct QueryDiversityConfig {
+    pub mode: QueryDiversity,
+    pub threshold: f32,
+    pub embedding_url: Option<String>,
+    pub embedding_model: Option<String>,
+}
+
+impl Default for QueryDiversityConfig {
+    fn default() -> Self {
+        Self {
+            mode: QueryDiversity::Exact,
+            threshold: 0.85,
+            embedding_url: None,
+            embedding_model: None,
+        }
+    }
+}
+
 /// Generate queries for documents
 pub struct QueryGenerator<'a> {
     provider: &'a LLMProvider,
     dry_run: bool,
     language: Option<String>,
+    /// Track seen query texts to avoid duplicates (normalized to lowercase)
+    seen_queries: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
+    /// Diversity config for query generation
+    diversity_config: QueryDiversityConfig,
+    /// Optional embedding-based diversity checker (lazily initialized)
+    embedding_checker: Option<Arc<QueryDiversityChecker>>,
 }
 
 impl<'a> QueryGenerator<'a> {
     pub fn new(provider: &'a LLMProvider, dry_run: bool) -> Self {
-        Self { provider, dry_run, language: None }
+        Self {
+            provider,
+            dry_run,
+            language: None,
+            seen_queries: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
+            diversity_config: QueryDiversityConfig::default(),
+            embedding_checker: None,
+        }
     }
 
     /// Set the target language for query generation
@@ -88,7 +123,55 @@ impl<'a> QueryGenerator<'a> {
         self
     }
 
+    /// Set diversity configuration
+    pub fn with_diversity(mut self, config: QueryDiversityConfig) -> Self {
+        // Initialize embedding checker if needed
+        if config.mode == QueryDiversity::Embedding {
+            let embedding_url = config.embedding_url.clone()
+                .unwrap_or_else(|| self.provider.base_url().to_string());
+            let embedding_model = config.embedding_model.clone()
+                .unwrap_or_else(|| self.provider.model().to_string());
+
+            let client = EmbeddingClient::new(&embedding_url, &embedding_model);
+            let checker = QueryDiversityChecker::new(client, config.threshold);
+            self.embedding_checker = Some(Arc::new(checker));
+        }
+        self.diversity_config = config;
+        self
+    }
+
+    /// Check if a query text is a duplicate (and register it if not)
+    /// Returns true if this is a NEW query (not seen before)
+    fn register_query(&self, query_text: &str) -> bool {
+        let normalized = query_text.to_lowercase().trim().to_string();
+        let mut seen = self.seen_queries.lock().unwrap();
+        seen.insert(normalized)
+    }
+
+    /// Check if a query is unique (both exact and embedding-based if enabled)
+    /// Returns true if unique, false if duplicate/too similar
+    async fn check_query_unique(&self, query_text: &str) -> Result<bool> {
+        // First check exact match
+        if !self.register_query(query_text) {
+            debug!("Query '{}' is exact duplicate", query_text);
+            return Ok(false);
+        }
+
+        // Then check embedding similarity if enabled
+        if let Some(checker) = &self.embedding_checker {
+            let is_unique = checker.check_and_register(query_text).await?;
+            if !is_unique {
+                debug!("Query '{}' is semantically too similar", query_text);
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
+
     /// Generate a single query for a document
+    /// Retries if duplicate query is detected
     pub async fn generate_one(
         &self,
         doc: &BeirDocument,
@@ -129,12 +212,25 @@ impl<'a> QueryGenerator<'a> {
         // For semantic queries, retry if there's word overlap
         if query_type == QueryType::Semantic {
             let text = self.generate_semantic_with_retry(&doc.text, &prompt).await?;
+            // Check for duplicate (exact + embedding if enabled)
+            if !self.check_query_unique(&text).await? {
+                warn!("Duplicate/similar semantic query detected: '{}', retrying", text);
+                return Err(anyhow::anyhow!("Duplicate query detected"));
+            }
             return Ok(BeirQuery { id: query_id, text });
         }
 
+        // Generate query and check for duplicates (exact + embedding if enabled)
         let text = self.provider.generate_query(&prompt).await?;
 
-        Ok(BeirQuery { id: query_id, text })
+        if self.check_query_unique(&text).await? {
+            // Not a duplicate, success!
+            return Ok(BeirQuery { id: query_id, text });
+        }
+
+        // Duplicate detected - return error so caller can retry with different document
+        warn!("Duplicate/similar query '{}' detected, will retry with different document", text);
+        Err(anyhow::anyhow!("Duplicate query detected: {}", text))
     }
 
     /// Generate semantic query with retry on word overlap
@@ -260,9 +356,9 @@ impl<'a> QueryGenerator<'a> {
         // Generate queries concurrently in batches
         let semaphore = Arc::new(Semaphore::new(concurrency));
 
-        // For semantic queries, track failed (query_idx, attempts) to retry with different docs
+        // Track failed queries to retry with different docs (for semantic or duplicate errors)
         let mut retry_queue: Vec<(usize, usize)> = Vec::new(); // (query_idx, attempt_count)
-        const MAX_DOC_RETRIES: usize = 3; // Try up to 3 different documents
+        const MAX_DOC_RETRIES: usize = 5; // Try up to 5 different documents
 
         for chunk in pending.chunks(concurrency * 2) {
             let futures: Vec<_> = chunk
@@ -302,20 +398,22 @@ impl<'a> QueryGenerator<'a> {
                         results.push((query, doc_id));
                         pb.inc(1);
                     }
-                    Err(e) if query_type == QueryType::Semantic => {
-                        // For semantic queries, queue for retry with different document
-                        warn!("Query {} failed: {}, will retry with different document", query_idx, e);
-                        retry_queue.push((query_idx, 1));
-                    }
                     Err(e) => {
-                        // For other query types, propagate the error
-                        return Err(e);
+                        // Queue for retry with different document (semantic overlap or duplicate)
+                        let err_str = e.to_string();
+                        if err_str.contains("overlap") || err_str.contains("Duplicate") {
+                            warn!("Query {} failed: {}, will retry with different document", query_idx, e);
+                            retry_queue.push((query_idx, 1));
+                        } else {
+                            // For other errors, propagate
+                            return Err(e);
+                        }
                     }
                 }
             }
         }
 
-        // Process retry queue for semantic queries with different documents (CONCURRENTLY)
+        // Process retry queue with different documents (CONCURRENTLY)
         while !retry_queue.is_empty() {
             let mut next_retry_queue: Vec<(usize, usize)> = Vec::new();
 
@@ -325,7 +423,7 @@ impl<'a> QueryGenerator<'a> {
                 .filter(|(query_idx, attempt)| {
                     if *attempt >= MAX_DOC_RETRIES {
                         warn!(
-                            "Semantic query {} failed after {} document attempts, skipping",
+                            "Query {} failed after {} document attempts, skipping",
                             query_idx, MAX_DOC_RETRIES
                         );
                         pb.inc(1);
@@ -340,12 +438,13 @@ impl<'a> QueryGenerator<'a> {
                 break;
             }
 
-            // Process retries concurrently
+            // Process retries concurrently with different documents
             let retry_futures: Vec<_> = to_process
                 .into_iter()
                 .map(|(query_idx, attempt)| {
                     let sem = semaphore.clone();
-                    let doc_idx = (query_idx + attempt * 7) % documents.len();
+                    // Pick a different document using prime multiplier for better spread
+                    let doc_idx = (query_idx + attempt * 17 + attempt * attempt * 3) % documents.len();
                     let doc = documents[doc_idx].clone();
                     async move {
                         let _permit = sem.acquire().await.unwrap();
@@ -369,11 +468,11 @@ impl<'a> QueryGenerator<'a> {
                         checkpoint_mgr.record_and_maybe_save(state)?;
                         results.push((query, doc_id.clone()));
                         pb.inc(1);
-                        info!("Semantic query {} succeeded with document {} on attempt {}",
+                        info!("Query {} succeeded with document {} on attempt {}",
                               query_idx, doc_id, attempt + 1);
                     }
                     Err(e) => {
-                        warn!("Semantic query {} failed with doc {}: {}", query_idx, doc_id, e);
+                        warn!("Query {} failed with doc {}: {}", query_idx, doc_id, e);
                         next_retry_queue.push((query_idx, attempt + 1));
                     }
                 }

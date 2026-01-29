@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use synthir::{
     benchmark::{run_benchmark, BenchmarkConfig},
     checkpoint::{CheckpointManager, GenerationPhase, ProgressState},
-    config::{parse_query_types, GenerationConfig, OnExist, OutputMode, QueryType, RuntimeOptions, ScoreScale, ScoringMode},
-    generation::{DocumentGenerator, QueryGenerator, RelevanceScorer},
+    config::{parse_query_types, GenerationConfig, OnExist, OutputMode, QueryType, RuntimeOptions, ScoreScale, ScoringMode, DocDiversity, QueryDiversity},
+    generation::{DocumentGenerator, DiversityConfig, QueryDiversityConfig, QueryGenerator, RelevanceScorer},
     llm::{topic_generation_prompt, translation_prompt, DEFAULT_TRANSLATE_LANGUAGES, LLMProvider, LLMProviderConfig, MultiEndpointProvider, LanguageDetector, locale_to_language, EmbeddingClient},
     meta::{run_meta_generation, MetaConfig},
     mining::HardNegativeMiner,
@@ -117,6 +117,30 @@ enum Commands {
         /// Maximum score for custom range (default: 100)
         #[arg(long, default_value = "100")]
         score_max: u16,
+
+        /// Document diversity mode: none, two-phase, or embedding
+        #[arg(long, default_value = "none")]
+        doc_diversity: String,
+
+        /// Query diversity mode: exact or embedding
+        #[arg(long, default_value = "exact")]
+        query_diversity: String,
+
+        /// Similarity threshold for diversity (0.0-1.0, higher = stricter)
+        #[arg(long, default_value = "0.85")]
+        diversity_threshold: f32,
+
+        /// Document categories for forced diversity (comma-separated, e.g., "soup,main,dessert")
+        #[arg(long)]
+        doc_categories: Option<String>,
+
+        /// Embedding API URL for diversity checking (defaults to --base-url)
+        #[arg(long)]
+        embedding_url: Option<String>,
+
+        /// Embedding model for diversity checking (defaults to --model)
+        #[arg(long)]
+        embedding_model: Option<String>,
     },
 
     /// Generate queries for an existing corpus
@@ -411,6 +435,12 @@ async fn main() -> Result<()> {
             score_scale,
             score_min,
             score_max,
+            doc_diversity,
+            query_diversity,
+            diversity_threshold,
+            doc_categories,
+            embedding_url,
+            embedding_model,
         } => {
             // Set up logging
             let level = if verbose { Level::DEBUG } else { Level::INFO };
@@ -442,6 +472,23 @@ async fn main() -> Result<()> {
                 .map(|s| parse_query_types(&s))
                 .transpose()
                 .map_err(|e| anyhow::anyhow!("Invalid query types: {}", e))?;
+
+            // Parse diversity modes
+            let doc_diversity: DocDiversity = doc_diversity
+                .parse()
+                .map_err(|e: String| anyhow::anyhow!(e))?;
+
+            let query_diversity: QueryDiversity = query_diversity
+                .parse()
+                .map_err(|e: String| anyhow::anyhow!(e))?;
+
+            // Parse document categories
+            let doc_categories: Option<Vec<String>> = doc_categories.map(|s| {
+                s.split(',')
+                    .map(|c| c.trim().to_string())
+                    .filter(|c| !c.is_empty())
+                    .collect()
+            });
 
             // Determine topic: use provided topic, or derive from output directory name when using existing corpus
             let effective_topic = topic.clone().unwrap_or_else(|| {
@@ -475,6 +522,12 @@ async fn main() -> Result<()> {
                 score_scale,
                 score_min,
                 score_max,
+                doc_diversity,
+                query_diversity,
+                diversity_threshold,
+                doc_categories,
+                embedding_url,
+                embedding_model,
             };
 
             let options = RuntimeOptions {
@@ -889,7 +942,15 @@ async fn run_generation(
             "Generating {} documents (concurrency: {})...",
             config.document_count, config.concurrency
         );
-        let doc_gen = DocumentGenerator::new(&provider, topic_config.clone(), options.dry_run);
+        let diversity_config = DiversityConfig {
+            mode: config.doc_diversity.clone(),
+            threshold: config.diversity_threshold,
+            categories: config.doc_categories.clone(),
+            embedding_url: config.embedding_url.clone(),
+            embedding_model: config.embedding_model.clone(),
+        };
+        let doc_gen = DocumentGenerator::new(&provider, topic_config.clone(), options.dry_run)
+            .with_diversity(diversity_config);
         let docs = doc_gen
             .generate_all_concurrent(
                 config.document_count,
@@ -918,7 +979,14 @@ async fn run_generation(
             "Generating queries (concurrency: {})...",
             config.concurrency
         );
-        let query_gen = QueryGenerator::new(&provider, options.dry_run);
+        let query_diversity_config = QueryDiversityConfig {
+            mode: config.query_diversity,
+            threshold: config.diversity_threshold,
+            embedding_url: config.embedding_url.clone(),
+            embedding_model: config.embedding_model.clone(),
+        };
+        let query_gen = QueryGenerator::new(&provider, options.dry_run)
+            .with_diversity(query_diversity_config);
 
         let mut all_query_doc_pairs: Vec<(BeirQuery, String)> = Vec::new();
 
@@ -928,14 +996,24 @@ async fn run_generation(
             .clone()
             .unwrap_or_else(QueryType::all_types);
 
-        // Generate each selected query type (excluding Mixed, handled separately)
-        for query_type in types_to_generate.iter().filter(|t| **t != QueryType::Mixed) {
+        // Filter out Mixed for now (handled separately)
+        let non_mixed_types: Vec<_> = types_to_generate.iter().filter(|t| **t != QueryType::Mixed).cloned().collect();
+
+        // Split total queries evenly across types
+        let queries_per_type = if non_mixed_types.is_empty() {
+            config.queries_per_type
+        } else {
+            config.queries_per_type / non_mixed_types.len()
+        };
+
+        // Generate each selected query type (all to the same queries.jsonl file)
+        for query_type in &non_mixed_types {
             let pairs = query_gen
                 .generate_for_type_concurrent(
                     &documents,
                     *query_type,
-                    config.queries_per_type,
-                    &organizer.queries_path(*query_type),
+                    queries_per_type,
+                    &organizer.queries_file(),
                     &mut state,
                     &mut checkpoint_mgr,
                     config.concurrency,
@@ -956,7 +1034,7 @@ async fn run_generation(
                 .generate_mixed(
                     &documents,
                     config.queries_per_type,
-                    &organizer.queries_path(QueryType::Mixed),
+                    &organizer.queries_file(),
                     &mut state,
                     &mut checkpoint_mgr,
                 )
@@ -1019,21 +1097,15 @@ async fn run_generation(
             }
         };
 
-        // Write qrels for each generated query type
-        for query_type in types_to_generate.iter().filter(|t| **t != QueryType::Mixed) {
-            let type_qrels: Vec<_> = qrels
-                .iter()
-                .filter(|q| q.query_id.starts_with(query_type.as_str()))
-                .cloned()
-                .collect();
-            write_qrels(&organizer.qrels_path(*query_type), &type_qrels)?;
-        }
+        // Write all qrels to single file
+        write_qrels(&organizer.qrels_file(), &qrels)?;
+        info!("Wrote {} qrels to {}", qrels.len(), organizer.qrels_file().display());
 
         state.advance_phase();
         checkpoint_mgr.force_save(&state)?;
 
-        // Phase 4: Hard Negative Mining (optional, requires merged output)
-        if config.generate_hard_negatives && !options.no_merged {
+        // Phase 4: Hard Negative Mining (optional)
+        if config.generate_hard_negatives {
             info!("Mining hard negatives...");
             let miner = HardNegativeMiner::new(&provider, options.dry_run);
 
@@ -1044,49 +1116,11 @@ async fn run_generation(
                 .mine_hard_negatives(&all_queries, &documents, &qrels, 3)
                 .await?;
 
-            // Merge qrels with hard negatives
+            // Append hard negatives to qrels file
             let mut merged_qrels = qrels.clone();
             merged_qrels.extend(hard_negatives);
-
-            // Write merged outputs
-            write_qrels(
-                &organizer.hard_negatives_merged_dir().join("qrels.tsv"),
-                &merged_qrels,
-            )?;
-
-            // Copy queries to merged directory
-            let all_query_refs: Vec<_> = all_query_doc_pairs.iter().map(|(q, _)| q.clone()).collect();
-            write_queries(
-                &organizer.hard_negatives_merged_dir().join("queries.jsonl"),
-                &all_query_refs,
-            )?;
-        }
-
-        // Write merged and combined folders only if not disabled
-        if !options.no_merged {
-            // Write general merged (without hard negatives)
-            let all_query_refs: Vec<_> = all_query_doc_pairs.iter().map(|(q, _)| q.clone()).collect();
-            write_queries(
-                &organizer.general_merged_dir().join("queries.jsonl"),
-                &all_query_refs,
-            )?;
-            write_qrels(&organizer.general_merged_dir().join("qrels.tsv"), &qrels)?;
-
-            // Write combined folder (corpus + all queries + all qrels in one place)
-            info!("Writing combined output folder...");
-            // Use original corpus path if provided, otherwise use organizer's corpus path
-            let corpus_source = config.corpus_path.as_ref()
-                .map(|p| p.clone())
-                .unwrap_or_else(|| organizer.corpus_path());
-            std::fs::copy(
-                &corpus_source,
-                organizer.combined_dir().join("corpus.jsonl"),
-            )?;
-            write_queries(
-                &organizer.combined_dir().join("queries.jsonl"),
-                &all_query_refs,
-            )?;
-            write_qrels(&organizer.combined_dir().join("qrels.tsv"), &qrels)?;
+            write_qrels(&organizer.qrels_file(), &merged_qrels)?;
+            info!("Added hard negatives, total qrels: {}", merged_qrels.len());
         }
 
         state.advance_phase();
@@ -1101,16 +1135,24 @@ async fn run_generation(
     };
     let generated_types = config.query_types.clone().unwrap_or(all_types_with_mixed);
 
+    // Calculate actual queries per type (split evenly)
+    let non_mixed_count = generated_types.iter().filter(|t| **t != QueryType::Mixed).count();
+    let actual_queries_per_type = if non_mixed_count > 0 {
+        config.queries_per_type / non_mixed_count
+    } else {
+        config.queries_per_type
+    };
+
     let metadata = DatasetMetadata {
         topic: topic_config.name.clone(),
         document_count: documents.len(),
         query_counts: QueryCounts {
-            natural: if generated_types.contains(&QueryType::Natural) { config.queries_per_type } else { 0 },
-            keyword: if generated_types.contains(&QueryType::Keyword) { config.queries_per_type } else { 0 },
-            academic: if generated_types.contains(&QueryType::Academic) { config.queries_per_type } else { 0 },
-            complex: if generated_types.contains(&QueryType::Complex) { config.queries_per_type } else { 0 },
-            semantic: if generated_types.contains(&QueryType::Semantic) { config.queries_per_type } else { 0 },
-            basic: if generated_types.contains(&QueryType::Basic) { config.queries_per_type } else { 0 },
+            natural: if generated_types.contains(&QueryType::Natural) { actual_queries_per_type } else { 0 },
+            keyword: if generated_types.contains(&QueryType::Keyword) { actual_queries_per_type } else { 0 },
+            academic: if generated_types.contains(&QueryType::Academic) { actual_queries_per_type } else { 0 },
+            complex: if generated_types.contains(&QueryType::Complex) { actual_queries_per_type } else { 0 },
+            semantic: if generated_types.contains(&QueryType::Semantic) { actual_queries_per_type } else { 0 },
+            basic: if generated_types.contains(&QueryType::Basic) { actual_queries_per_type } else { 0 },
             mixed: if generated_types.contains(&QueryType::Mixed) { config.queries_per_type } else { 0 },
         },
         generation_timestamp: chrono_lite_timestamp(),

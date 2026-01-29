@@ -1,7 +1,7 @@
 //! Meta mode for generating multiple datasets automatically
 
 use crate::checkpoint::{CheckpointManager, ProgressState};
-use crate::config::{GenerationConfig, QueryType, ScoreScale, ScoringMode};
+use crate::config::{DocDiversity, GenerationConfig, QueryDiversity, QueryType, ScoreScale, ScoringMode};
 use crate::generation::{DocumentGenerator, QueryGenerator, RelevanceScorer};
 use crate::llm::{LLMProvider, LLMProviderConfig};
 use crate::mining::HardNegativeMiner;
@@ -137,6 +137,12 @@ pub async fn run_meta_generation(config: MetaConfig) -> Result<()> {
             score_scale: ScoreScale::Trec,
             score_min: 0,
             score_max: 3,
+            doc_diversity: DocDiversity::default(),
+            query_diversity: QueryDiversity::default(),
+            diversity_threshold: 0.85,
+            doc_categories: None,
+            embedding_url: None,
+            embedding_model: None,
         };
 
         let mut state = ProgressState::new(gen_config.clone());
@@ -194,6 +200,12 @@ pub async fn run_meta_generation(config: MetaConfig) -> Result<()> {
             score_scale: ScoreScale::Trec,
             score_min: 0,
             score_max: 3,
+            doc_diversity: DocDiversity::default(),
+            query_diversity: QueryDiversity::default(),
+            diversity_threshold: 0.85,
+            doc_categories: None,
+            embedding_url: None,
+            embedding_model: None,
         };
 
         let organizer = OutputOrganizer::new(topic_dir.clone(), sanitized_name.clone());

@@ -27,6 +27,15 @@ pub struct QueryCounts {
 }
 
 /// Organizes the output directory structure
+///
+/// Simplified flat structure:
+/// ```
+/// dataset_name/
+/// ├── corpus.jsonl
+/// ├── queries.jsonl
+/// ├── qrels.tsv
+/// └── metadata.json
+/// ```
 pub struct OutputOrganizer {
     base_dir: PathBuf,
     topic: String,
@@ -58,77 +67,40 @@ impl OutputOrganizer {
         self.topic_dir().join("corpus.jsonl")
     }
 
-    /// Get queries directory for a query type
-    pub fn queries_dir(&self, query_type: QueryType) -> PathBuf {
-        self.topic_dir().join(query_type.as_str())
+    /// Get queries file path (all queries in one file, same directory as corpus)
+    pub fn queries_path(&self, _query_type: QueryType) -> PathBuf {
+        self.topic_dir().join("queries.jsonl")
     }
 
-    /// Get queries file path for a query type
-    pub fn queries_path(&self, query_type: QueryType) -> PathBuf {
-        self.queries_dir(query_type).join("queries.jsonl")
+    /// Get the single queries file path
+    pub fn queries_file(&self) -> PathBuf {
+        self.topic_dir().join("queries.jsonl")
     }
 
-    /// Get qrels file path for a query type
-    pub fn qrels_path(&self, query_type: QueryType) -> PathBuf {
-        self.queries_dir(query_type).join("qrels.tsv")
+    /// Get qrels file path (same directory as corpus)
+    pub fn qrels_path(&self, _query_type: QueryType) -> PathBuf {
+        self.topic_dir().join("qrels.tsv")
     }
 
-    /// Get merged directory
-    pub fn merged_dir(&self) -> PathBuf {
-        self.topic_dir().join("merged")
-    }
-
-    /// Get general merged directory (without hard negatives)
-    pub fn general_merged_dir(&self) -> PathBuf {
-        self.merged_dir().join("general")
-    }
-
-    /// Get merged directory with hard negatives
-    pub fn hard_negatives_merged_dir(&self) -> PathBuf {
-        self.merged_dir().join("with-hard-negatives")
-    }
-
-    /// Get combined directory (everything in one place)
-    pub fn combined_dir(&self) -> PathBuf {
-        self.topic_dir().join("combined")
-    }
-
-    /// Get hard negatives file path
-    pub fn hard_negatives_path(&self) -> PathBuf {
-        self.hard_negatives_merged_dir().join("hard_negatives.jsonl")
+    /// Get the single qrels file path
+    pub fn qrels_file(&self) -> PathBuf {
+        self.topic_dir().join("qrels.tsv")
     }
 
     /// Get metadata file path
     pub fn metadata_path(&self) -> PathBuf {
-        self.base_dir.join("metadata.json")
+        self.topic_dir().join("metadata.json")
     }
 
-    /// Create the full directory structure for all query types
+    /// Create the directory structure (simplified - just the topic directory)
     pub fn create_structure(&self) -> Result<()> {
-        let mut all_types = QueryType::all_types();
-        all_types.push(QueryType::Mixed);
-        self.create_structure_for_types(&all_types, true, true)
+        fs::create_dir_all(self.topic_dir())?;
+        Ok(())
     }
 
-    /// Create directory structure for specific query types only
-    pub fn create_structure_for_types(&self, query_types: &[QueryType], include_hard_negatives: bool, include_merged: bool) -> Result<()> {
-        // Create topic directory
+    /// Create directory structure (simplified - ignores query types, just creates topic dir)
+    pub fn create_structure_for_types(&self, _query_types: &[QueryType], _include_hard_negatives: bool, _include_merged: bool) -> Result<()> {
         fs::create_dir_all(self.topic_dir())?;
-
-        // Create only the requested query type directories
-        for query_type in query_types {
-            fs::create_dir_all(self.queries_dir(*query_type))?;
-        }
-
-        // Create merged/combined directories only if requested
-        if include_merged {
-            fs::create_dir_all(self.general_merged_dir())?;
-            if include_hard_negatives {
-                fs::create_dir_all(self.hard_negatives_merged_dir())?;
-            }
-            fs::create_dir_all(self.combined_dir())?;
-        }
-
         Ok(())
     }
 
@@ -141,25 +113,47 @@ impl OutputOrganizer {
 
     /// Get all output paths for dry-run display
     pub fn all_paths(&self) -> Vec<PathBuf> {
-        let mut paths = vec![
+        vec![
             self.corpus_path(),
+            self.queries_file(),
+            self.qrels_file(),
             self.metadata_path(),
-        ];
+        ]
+    }
 
-        for query_type in QueryType::all_types() {
-            paths.push(self.queries_path(query_type));
-            paths.push(self.qrels_path(query_type));
-        }
-        paths.push(self.queries_path(QueryType::Mixed));
-        paths.push(self.qrels_path(QueryType::Mixed));
+    // Legacy methods for backwards compatibility - now point to main files
 
-        paths.push(self.general_merged_dir().join("queries.jsonl"));
-        paths.push(self.general_merged_dir().join("qrels.tsv"));
-        paths.push(self.hard_negatives_merged_dir().join("queries.jsonl"));
-        paths.push(self.hard_negatives_merged_dir().join("qrels.tsv"));
-        paths.push(self.hard_negatives_path());
+    /// Get queries directory for a query type (legacy - returns topic dir)
+    #[allow(dead_code)]
+    pub fn queries_dir(&self, _query_type: QueryType) -> PathBuf {
+        self.topic_dir()
+    }
 
-        paths
+    /// Get merged directory (legacy - returns topic dir)
+    #[allow(dead_code)]
+    pub fn merged_dir(&self) -> PathBuf {
+        self.topic_dir()
+    }
+
+    /// Get general merged directory (legacy - returns topic dir)
+    pub fn general_merged_dir(&self) -> PathBuf {
+        self.topic_dir()
+    }
+
+    /// Get merged directory with hard negatives (legacy - returns topic dir)
+    pub fn hard_negatives_merged_dir(&self) -> PathBuf {
+        self.topic_dir()
+    }
+
+    /// Get combined directory (legacy - returns topic dir)
+    pub fn combined_dir(&self) -> PathBuf {
+        self.topic_dir()
+    }
+
+    /// Get hard negatives file path
+    #[allow(dead_code)]
+    pub fn hard_negatives_path(&self) -> PathBuf {
+        self.topic_dir().join("hard_negatives.jsonl")
     }
 }
 
